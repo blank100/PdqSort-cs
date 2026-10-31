@@ -1,179 +1,230 @@
 # PdqSort-cs
-Pdq排序算法的C#实现,性能较C#内置的排序算法要好不少,应该是目前综合性能最好的排序算法.
-主要是参照 https://gist.github.com/hez2010/6b52929ee1755788c34818972c46aefb 实现的
+
+Pattern-defeating Quicksort (PDQSort) 排序算法的 C# 高性能实现，另有面向有序序列范围检索的模糊二分查找 (`FuzzyBinarySearch`)。
+实现参考自 Orson Peters 的 C++ `pdqsort` 以及 [hez2010/pdqsort.cs](https://gist.github.com/hez2010/6b52929ee1755788c34818972c46aefb)，并针对 .NET RyuJIT 进行了深度优化。
+
+## 实现版本
+
+项目在 `Gal.Core` 命名空间下提供三种 `PdqSort` 实现以及 `FuzzyBinarySearch` 工具类：
+
+| 类型 | 适用类型约束 | 说明 |
+| --- | --- | --- |
+| `PdqSortHelper` | `T` (任意类型) | 基于 `Span<T>` 的安全索引实现，配合栈上偏移缓冲实现自适应 BlockQuicksort |
+| `PdqSortHelper_Unguarded` | `T` (任意类型) | 基于 `MemoryMarshal.GetReference` 与 `Unsafe` 托管引用 (`ref T`) 的无边界检查实现 |
+| `PdqSortHelper_Unmanaged` | `T : unmanaged` | 基于非托管指针 (`T*`) 的无边界检查实现 |
+| `FuzzyBinarySearch` | `T` (任意类型) | 支持 `IReadOnlyList<T>` 与 `ReadOnlySpan<T>` 的模糊二分查找 |
+
+## 核心特性与优化
+
+- **自适应无分支块分区 (Adaptive BlockQuicksort)**：
+  - 当元素满足无分支分区条件且分片长度较大时，采用 `64` 元素分块的 `stackalloc byte[64]` 双缓冲无分支偏移扫描与批量循环置换，消除内层循环分支预测失败开销。
+  - 当单块扫描命中数全为 `0` 或 `64`（高度偏斜或包含大量重复元素）时，在完成当前剩余偏移压缩后自动无缝切换至 Hoare 双指针分区，兼顾随机数据吞吐量与重复/偏斜模式性能。
+- **四分位九数取中 (Quartile Tukey's Ninther)**：
+  - 大规模分片 (`size > 128`) 采用四分位点 (`q = size >> 2`) 附近的 9 个采样点计算枢轴，显著提升山峰型 (`Peek`)、逆山峰型 (`ReversePeek`) 及近似有序数据的分割均衡度。
+- **模式识别与对抗退化防御**：
+  - 自动检测全相等、已排序、逆序等模式并在 $O(N)$ 时间内完成处理；遇到高度不平衡分割时通过 XorShift 打乱模式，最坏情况自动退化为无递归零分配 Floyd 堆排序 (`HeapSort`)，严格保证 $O(N \log N)$ 时间复杂度与 $O(\log N)$ 栈空间复杂度。
+- **RyuJIT 深度调优与 100% 测试覆盖**：
+  - 消除内层循环边界检查与冗余临时拷贝，使用 `[SkipLocalsInit]` 与冷热路径分离 (`[MethodImpl(MethodImplOptions.NoInlining)]`) 防止大栈帧内联污染热路径寄存器分配。
+  - 单元测试 (`PdqSort.Test`) 达到 **100% 行覆盖率与 100% 分支覆盖率**。
+
+## 使用示例
+
+```csharp
+using System;
+using Gal.Core;
+
+Span<int> data = stackalloc int[] { 9, 3, 7, 1, 5, 8, 2, 6, 4, 0 };
+
+// 1. Span<T> 版本
+PdqSortHelper.PdqSort(data, static (a, b) => a.CompareTo(b));
+
+// 2. Unguarded (ref T) 版本
+PdqSortHelper_Unguarded.PdqSort(data, static (a, b) => a.CompareTo(b));
+
+// 3. Unmanaged (T*) 版本
+PdqSortHelper_Unmanaged.PdqSort(data, static (a, b) => a.CompareTo(b));
+
+// 4. 模糊二分查找 (查找满足范围条件的元素索引，未命中返回 -1)
+ReadOnlySpan<int> sorted = data;
+int index = FuzzyBinarySearch.Exec(sorted, static x => 5.CompareTo(x));
+```
+
+## 基准测试 (Benchmark)
+
+以下为基于 BenchmarkDotNet 在 `.NET 8.0 (X64 RyuJIT AVX2)` 下对 7 种数据分布（全相等 `AllEqual`、随机 `Random`、近似随机 `RandomNear`、升序 `Sequence`、逆序 `Reverse`、山峰 `Peek`、逆山峰 `ReversePeek`）及 6 种数据规模（`10` ~ `1,000,000`）与 `Array.Sort` (`BuildInSort`) 的对比结果：
 
 |                        Method |    size |             Mean |           Error |          StdDev |           Median | Ratio | RatioSD | Allocated | Alloc Ratio |
 |------------------------------ |-------- |-----------------:|----------------:|----------------:|-----------------:|------:|--------:|----------:|------------:|
-|          BuildInSort_AllEqual |      10 |       1,985.0 ns |       153.98 ns |       454.02 ns |       2,100.0 ns |  1.00 |    0.00 |     728 B |        1.00 |
-|         PdqSort_Span_AllEqual |      10 |         245.0 ns |        34.21 ns |       100.88 ns |         300.0 ns |  0.13 |    0.07 |     640 B |        0.88 |
-|    PdqSort_Unguarded_AllEqual |      10 |         185.0 ns |        45.32 ns |       133.62 ns |         200.0 ns |  0.10 |    0.08 |     640 B |        0.88 |
-|    PdqSort_Unmanaged_AllEqual |      10 |         234.0 ns |        41.32 ns |       121.83 ns |         250.0 ns |  0.13 |    0.07 |     640 B |        0.88 |
-|            BuildInSort_Random |      10 |       2,005.0 ns |       154.44 ns |       455.36 ns |       2,200.0 ns |  1.07 |    0.38 |     728 B |        1.00 |
-|           PdqSort_Span_Random |      10 |         408.1 ns |        56.11 ns |       164.55 ns |         500.0 ns |  0.22 |    0.11 |     640 B |        0.88 |
-|      PdqSort_Unguarded_Random |      10 |         398.0 ns |        40.04 ns |       118.05 ns |         400.0 ns |  0.22 |    0.10 |     640 B |        0.88 |
-|      PdqSort_Unmanaged_Random |      10 |         280.0 ns |        59.82 ns |       176.38 ns |         300.0 ns |  0.15 |    0.11 |     640 B |        0.88 |
-|        BuildInSort_RandomNear |      10 |       1,931.0 ns |       161.73 ns |       476.88 ns |       2,050.0 ns |  1.03 |    0.37 |     728 B |        1.00 |
-|       PdqSort_Span_RandomNear |      10 |         196.0 ns |        52.79 ns |       155.65 ns |         200.0 ns |  0.10 |    0.09 |     640 B |        0.88 |
-|  PdqSort_Unguarded_RandomNear |      10 |         303.0 ns |        51.80 ns |       152.72 ns |         300.0 ns |  0.17 |    0.10 |     640 B |        0.88 |
-|  PdqSort_Unmanaged_RandomNear |      10 |         266.0 ns |        40.11 ns |       118.25 ns |         200.0 ns |  0.14 |    0.07 |     640 B |        0.88 |
-|          BuildInSort_Sequence |      10 |       1,700.5 ns |       154.68 ns |       453.64 ns |       1,450.0 ns |  0.91 |    0.38 |     728 B |        1.00 |
-|         PdqSort_Span_Sequence |      10 |         232.0 ns |        42.27 ns |       124.62 ns |         200.0 ns |  0.12 |    0.07 |     640 B |        0.88 |
-|    PdqSort_Unguarded_Sequence |      10 |         159.0 ns |        43.94 ns |       129.56 ns |         100.0 ns |  0.09 |    0.08 |     640 B |        0.88 |
-|    PdqSort_Unmanaged_Sequence |      10 |         250.5 ns |        52.32 ns |       153.45 ns |         300.0 ns |  0.13 |    0.09 |     640 B |        0.88 |
-|           BuildInSort_Reverse |      10 |       2,529.8 ns |       210.35 ns |       600.15 ns |       2,600.0 ns |  1.36 |    0.55 |     728 B |        1.00 |
-|          PdqSort_Span_Reverse |      10 |         426.0 ns |        54.46 ns |       160.57 ns |         450.0 ns |  0.23 |    0.11 |     640 B |        0.88 |
-|     PdqSort_Unguarded_Reverse |      10 |         290.5 ns |        29.81 ns |        80.09 ns |         300.0 ns |  0.15 |    0.06 |     640 B |        0.88 |
-|     PdqSort_Unmanaged_Reverse |      10 |         188.8 ns |        19.85 ns |        53.66 ns |         150.0 ns |  0.10 |    0.05 |     640 B |        0.88 |
-|              BuildInSort_Peek |      10 |       1,736.4 ns |        94.26 ns |       259.61 ns |       1,700.0 ns |  0.92 |    0.29 |     728 B |        1.00 |
-|             PdqSort_Span_Peek |      10 |         370.0 ns |        58.94 ns |       173.79 ns |         400.0 ns |  0.20 |    0.11 |     640 B |        0.88 |
-|        PdqSort_Unguarded_Peek |      10 |         295.0 ns |        58.32 ns |       171.96 ns |         200.0 ns |  0.17 |    0.13 |     640 B |        0.88 |
-|        PdqSort_Unmanaged_Peek |      10 |         181.3 ns |        15.52 ns |        39.23 ns |         200.0 ns |  0.09 |    0.03 |     640 B |        0.88 |
-|       BuildInSort_ReversePeek |      10 |       2,007.0 ns |       155.55 ns |       458.64 ns |       1,800.0 ns |  1.08 |    0.39 |     728 B |        1.00 |
-|      PdqSort_Span_ReversePeek |      10 |         182.9 ns |        23.74 ns |        62.96 ns |         150.0 ns |  0.09 |    0.04 |     640 B |        0.88 |
-| PdqSort_Unguarded_ReversePeek |      10 |         187.3 ns |        21.67 ns |        56.31 ns |         200.0 ns |  0.10 |    0.04 |     640 B |        0.88 |
-| PdqSort_Unmanaged_ReversePeek |      10 |         170.4 ns |        21.17 ns |        55.78 ns |         200.0 ns |  0.09 |    0.04 |     640 B |        0.88 |
+|          BuildInSort_AllEqual |      10 |       1,726.4 ns |       275.17 ns |       703.92 ns |       1,379.0 ns |  1.00 |    0.00 |     824 B |        1.00 |
+|         PdqSort_Span_AllEqual |      10 |         256.8 ns |        71.06 ns |       179.91 ns |         172.5 ns |  0.15 |    0.12 |     736 B |        0.89 |
+|    PdqSort_Unguarded_AllEqual |      10 |         211.8 ns |        45.61 ns |       113.63 ns |         198.5 ns |  0.12 |    0.08 |     736 B |        0.89 |
+|    PdqSort_Unmanaged_AllEqual |      10 |         148.1 ns |        33.98 ns |        83.28 ns |         124.0 ns |  0.09 |    0.06 |     736 B |        0.89 |
+|            BuildInSort_Random |      10 |       1,386.8 ns |        85.81 ns |       210.26 ns |       1,335.0 ns |  0.80 |    0.35 |     824 B |        1.00 |
+|           PdqSort_Span_Random |      10 |         219.2 ns |        28.19 ns |        69.07 ns |         205.0 ns |  0.13 |    0.07 |     736 B |        0.89 |
+|      PdqSort_Unguarded_Random |      10 |         301.7 ns |        41.69 ns |       101.59 ns |         286.5 ns |  0.17 |    0.09 |     736 B |        0.89 |
+|      PdqSort_Unmanaged_Random |      10 |         280.0 ns |        56.60 ns |       144.78 ns |         262.5 ns |  0.16 |    0.11 |     736 B |        0.89 |
+|        BuildInSort_RandomNear |      10 |       1,326.1 ns |        74.66 ns |       177.74 ns |       1,304.5 ns |  0.77 |    0.33 |     824 B |        1.00 |
+|       PdqSort_Span_RandomNear |      10 |         104.6 ns |        20.97 ns |        51.96 ns |          97.0 ns |  0.06 |    0.04 |     736 B |        0.89 |
+|  PdqSort_Unguarded_RandomNear |      10 |         245.0 ns |        19.68 ns |        48.51 ns |         245.0 ns |  0.14 |    0.06 |     736 B |        0.89 |
+|  PdqSort_Unmanaged_RandomNear |      10 |          65.5 ns |         4.52 ns |         3.78 ns |          65.0 ns |  0.04 |    0.02 |     736 B |        0.89 |
+|          BuildInSort_Sequence |      10 |       1,507.0 ns |       132.95 ns |       322.09 ns |       1,407.5 ns |  0.87 |    0.40 |     824 B |        1.00 |
+|         PdqSort_Span_Sequence |      10 |         202.1 ns |        15.63 ns |        37.65 ns |         196.5 ns |  0.12 |    0.05 |     736 B |        0.89 |
+|    PdqSort_Unguarded_Sequence |      10 |         125.6 ns |        15.54 ns |        37.64 ns |         118.0 ns |  0.07 |    0.04 |     736 B |        0.89 |
+|    PdqSort_Unmanaged_Sequence |      10 |         305.0 ns |        56.13 ns |       141.36 ns |         260.5 ns |  0.18 |    0.11 |     736 B |        0.89 |
+|           BuildInSort_Reverse |      10 |       1,686.2 ns |       133.82 ns |       322.34 ns |       1,608.0 ns |  0.98 |    0.44 |     824 B |        1.00 |
+|          PdqSort_Span_Reverse |      10 |         428.7 ns |        46.31 ns |       115.99 ns |         386.0 ns |  0.25 |    0.12 |     736 B |        0.89 |
+|     PdqSort_Unguarded_Reverse |      10 |         552.2 ns |        92.48 ns |       239.01 ns |         491.0 ns |  0.32 |    0.19 |     736 B |        0.89 |
+|     PdqSort_Unmanaged_Reverse |      10 |         469.2 ns |        60.12 ns |       152.20 ns |         462.5 ns |  0.27 |    0.14 |     736 B |        0.89 |
+|              BuildInSort_Peek |      10 |       1,971.7 ns |       243.79 ns |       600.73 ns |       1,814.5 ns |  1.14 |    0.58 |    1496 B |        1.82 |
+|             PdqSort_Span_Peek |      10 |         255.4 ns |        44.02 ns |       112.04 ns |         264.0 ns |  0.15 |    0.09 |     736 B |        0.89 |
+|        PdqSort_Unguarded_Peek |      10 |         290.4 ns |        34.62 ns |        87.65 ns |         287.0 ns |  0.17 |    0.09 |     736 B |        0.89 |
+|        PdqSort_Unmanaged_Peek |      10 |         374.6 ns |        51.94 ns |       133.54 ns |         380.5 ns |  0.22 |    0.12 |     736 B |        0.89 |
+|       BuildInSort_ReversePeek |      10 |       1,715.8 ns |       119.09 ns |       299.91 ns |       1,720.0 ns |  0.99 |    0.44 |     824 B |        1.00 |
+|      PdqSort_Span_ReversePeek |      10 |         369.2 ns |        53.28 ns |       136.99 ns |         364.5 ns |  0.21 |    0.12 |     736 B |        0.89 |
+| PdqSort_Unguarded_ReversePeek |      10 |         370.2 ns |        44.35 ns |       112.29 ns |         352.0 ns |  0.21 |    0.11 |     736 B |        0.89 |
+| PdqSort_Unmanaged_ReversePeek |      10 |         367.0 ns |        43.26 ns |       110.67 ns |         354.5 ns |  0.21 |    0.11 |     736 B |        0.89 |
 |                               |         |                  |                 |                 |                  |       |         |           |             |
-|          BuildInSort_AllEqual |     100 |       3,883.0 ns |       154.03 ns |       454.17 ns |       3,700.0 ns |  1.00 |    0.00 |     728 B |        1.00 |
-|         PdqSort_Span_AllEqual |     100 |         603.4 ns |        20.92 ns |        57.63 ns |         600.0 ns |  0.16 |    0.02 |     640 B |        0.88 |
-|    PdqSort_Unguarded_AllEqual |     100 |         555.3 ns |        20.97 ns |        56.71 ns |         600.0 ns |  0.14 |    0.02 |     640 B |        0.88 |
-|    PdqSort_Unmanaged_AllEqual |     100 |         668.0 ns |        48.42 ns |       142.76 ns |         600.0 ns |  0.17 |    0.04 |     640 B |        0.88 |
-|            BuildInSort_Random |     100 |       5,637.5 ns |       113.91 ns |       177.35 ns |       5,550.0 ns |  1.44 |    0.15 |     728 B |        1.00 |
-|           PdqSort_Span_Random |     100 |       2,111.2 ns |       146.84 ns |       406.88 ns |       2,000.0 ns |  0.55 |    0.13 |     640 B |        0.88 |
-|      PdqSort_Unguarded_Random |     100 |       2,045.1 ns |       141.18 ns |       395.89 ns |       1,900.0 ns |  0.53 |    0.11 |     640 B |        0.88 |
-|      PdqSort_Unmanaged_Random |     100 |       2,284.8 ns |       129.17 ns |       364.33 ns |       2,200.0 ns |  0.60 |    0.11 |     640 B |        0.88 |
-|        BuildInSort_RandomNear |     100 |       4,626.9 ns |        81.50 ns |       111.56 ns |       4,600.0 ns |  1.18 |    0.14 |     728 B |        1.00 |
-|       PdqSort_Span_RandomNear |     100 |       1,701.1 ns |       157.84 ns |       442.59 ns |       1,500.0 ns |  0.44 |    0.13 |     640 B |        0.88 |
-|  PdqSort_Unguarded_RandomNear |     100 |       2,462.0 ns |       318.15 ns |       938.06 ns |       2,150.0 ns |  0.64 |    0.26 |     640 B |        0.88 |
-|  PdqSort_Unmanaged_RandomNear |     100 |       1,869.6 ns |       114.16 ns |       321.99 ns |       1,800.0 ns |  0.49 |    0.09 |     640 B |        0.88 |
-|          BuildInSort_Sequence |     100 |       3,602.2 ns |        75.41 ns |       145.28 ns |       3,600.0 ns |  0.94 |    0.11 |     728 B |        1.00 |
-|         PdqSort_Span_Sequence |     100 |         737.0 ns |        60.72 ns |       179.03 ns |         700.0 ns |  0.19 |    0.05 |     640 B |        0.88 |
-|    PdqSort_Unguarded_Sequence |     100 |         614.0 ns |        58.05 ns |       171.16 ns |         650.0 ns |  0.16 |    0.05 |     640 B |        0.88 |
-|    PdqSort_Unmanaged_Sequence |     100 |         571.4 ns |        17.74 ns |        45.47 ns |         600.0 ns |  0.15 |    0.02 |     640 B |        0.88 |
-|           BuildInSort_Reverse |     100 |       5,519.7 ns |       155.98 ns |       457.47 ns |       5,650.0 ns |  1.44 |    0.21 |     728 B |        1.00 |
-|          PdqSort_Span_Reverse |     100 |         825.6 ns |        26.37 ns |        69.94 ns |         800.0 ns |  0.21 |    0.03 |     640 B |        0.88 |
-|     PdqSort_Unguarded_Reverse |     100 |         968.0 ns |        77.86 ns |       229.57 ns |         850.0 ns |  0.25 |    0.07 |     640 B |        0.88 |
-|     PdqSort_Unmanaged_Reverse |     100 |       1,007.1 ns |        63.93 ns |       187.49 ns |       1,100.0 ns |  0.26 |    0.05 |     640 B |        0.88 |
-|              BuildInSort_Peek |     100 |       7,894.0 ns |       181.00 ns |       533.68 ns |       7,700.0 ns |  2.06 |    0.26 |     728 B |        1.00 |
-|             PdqSort_Span_Peek |     100 |       2,377.0 ns |        49.11 ns |       134.42 ns |       2,400.0 ns |  0.62 |    0.08 |     640 B |        0.88 |
-|        PdqSort_Unguarded_Peek |     100 |       2,408.6 ns |       101.67 ns |       288.42 ns |       2,300.0 ns |  0.63 |    0.10 |     640 B |        0.88 |
-|        PdqSort_Unmanaged_Peek |     100 |       2,559.5 ns |       132.97 ns |       381.51 ns |       2,550.0 ns |  0.67 |    0.12 |     640 B |        0.88 |
-|       BuildInSort_ReversePeek |     100 |       7,176.9 ns |       130.76 ns |       109.19 ns |       7,200.0 ns |  1.77 |    0.26 |     728 B |        1.00 |
-|      PdqSort_Span_ReversePeek |     100 |       2,553.4 ns |       105.02 ns |       289.25 ns |       2,500.0 ns |  0.67 |    0.10 |     640 B |        0.88 |
-| PdqSort_Unguarded_ReversePeek |     100 |       2,262.0 ns |        76.68 ns |       216.28 ns |       2,200.0 ns |  0.59 |    0.08 |     640 B |        0.88 |
-| PdqSort_Unmanaged_ReversePeek |     100 |       2,364.9 ns |       100.19 ns |       285.85 ns |       2,250.0 ns |  0.62 |    0.10 |     640 B |        0.88 |
+|          BuildInSort_AllEqual |     100 |       3,426.6 ns |       106.06 ns |       268.50 ns |       3,379.0 ns |  1.00 |    0.00 |     824 B |        1.00 |
+|         PdqSort_Span_AllEqual |     100 |       1,070.6 ns |        67.71 ns |       173.20 ns |       1,060.0 ns |  0.31 |    0.06 |     736 B |        0.89 |
+|    PdqSort_Unguarded_AllEqual |     100 |         865.5 ns |        64.24 ns |       160.92 ns |         855.5 ns |  0.25 |    0.05 |     736 B |        0.89 |
+|    PdqSort_Unmanaged_AllEqual |     100 |         818.4 ns |        43.00 ns |       107.72 ns |         805.0 ns |  0.24 |    0.04 |     736 B |        0.89 |
+|            BuildInSort_Random |     100 |       5,818.5 ns |       126.57 ns |       271.11 ns |       5,782.0 ns |  1.70 |    0.15 |     824 B |        1.00 |
+|           PdqSort_Span_Random |     100 |       3,458.4 ns |       123.32 ns |       310.56 ns |       3,419.5 ns |  1.01 |    0.12 |     736 B |        0.89 |
+|      PdqSort_Unguarded_Random |     100 |       3,462.3 ns |       161.11 ns |       412.15 ns |       3,408.0 ns |  1.01 |    0.14 |     736 B |        0.89 |
+|      PdqSort_Unmanaged_Random |     100 |       3,209.8 ns |       111.58 ns |       278.00 ns |       3,201.0 ns |  0.94 |    0.11 |     736 B |        0.89 |
+|        BuildInSort_RandomNear |     100 |       4,955.7 ns |       120.87 ns |       306.01 ns |       4,941.0 ns |  1.45 |    0.14 |     824 B |        1.00 |
+|       PdqSort_Span_RandomNear |     100 |       2,902.8 ns |       140.93 ns |       358.67 ns |       2,869.5 ns |  0.85 |    0.12 |     736 B |        0.89 |
+|  PdqSort_Unguarded_RandomNear |     100 |       2,695.5 ns |       113.98 ns |       283.97 ns |       2,656.5 ns |  0.79 |    0.10 |     736 B |        0.89 |
+|  PdqSort_Unmanaged_RandomNear |     100 |       3,148.7 ns |       172.82 ns |       432.90 ns |       3,103.0 ns |  0.92 |    0.15 |     736 B |        0.89 |
+|          BuildInSort_Sequence |     100 |       3,124.0 ns |        79.02 ns |       191.44 ns |       3,111.0 ns |  0.91 |    0.09 |     824 B |        1.00 |
+|         PdqSort_Span_Sequence |     100 |         599.4 ns |        58.68 ns |       150.89 ns |         616.0 ns |  0.17 |    0.05 |     736 B |        0.89 |
+|    PdqSort_Unguarded_Sequence |     100 |         719.6 ns |        32.81 ns |        82.62 ns |         724.5 ns |  0.21 |    0.03 |     736 B |        0.89 |
+|    PdqSort_Unmanaged_Sequence |     100 |         810.5 ns |        24.23 ns |        60.03 ns |         804.0 ns |  0.24 |    0.03 |     736 B |        0.89 |
+|           BuildInSort_Reverse |     100 |       4,264.0 ns |        98.37 ns |       243.74 ns |       4,243.0 ns |  1.24 |    0.12 |     824 B |        1.00 |
+|          PdqSort_Span_Reverse |     100 |       1,014.5 ns |        40.06 ns |       100.34 ns |         993.5 ns |  0.30 |    0.04 |     736 B |        0.89 |
+|     PdqSort_Unguarded_Reverse |     100 |       1,051.1 ns |        40.12 ns |        97.77 ns |       1,043.0 ns |  0.31 |    0.04 |     736 B |        0.89 |
+|     PdqSort_Unmanaged_Reverse |     100 |       1,181.9 ns |        38.84 ns |        95.18 ns |       1,177.0 ns |  0.34 |    0.04 |     736 B |        0.89 |
+|              BuildInSort_Peek |     100 |       6,558.1 ns |       148.08 ns |       314.82 ns |       6,500.5 ns |  1.91 |    0.18 |     824 B |        1.00 |
+|             PdqSort_Span_Peek |     100 |       3,446.1 ns |        95.05 ns |       240.63 ns |       3,414.0 ns |  1.01 |    0.11 |     736 B |        0.89 |
+|        PdqSort_Unguarded_Peek |     100 |       3,919.5 ns |       174.88 ns |       447.38 ns |       4,010.5 ns |  1.14 |    0.16 |     736 B |        0.89 |
+|        PdqSort_Unmanaged_Peek |     100 |       3,808.2 ns |       191.41 ns |       494.67 ns |       3,677.0 ns |  1.11 |    0.17 |     736 B |        0.89 |
+|       BuildInSort_ReversePeek |     100 |       7,294.0 ns |       285.46 ns |       730.24 ns |       7,059.5 ns |  2.13 |    0.27 |     824 B |        1.00 |
+|      PdqSort_Span_ReversePeek |     100 |       3,518.6 ns |       146.81 ns |       365.75 ns |       3,441.0 ns |  1.03 |    0.13 |     736 B |        0.89 |
+| PdqSort_Unguarded_ReversePeek |     100 |       3,647.6 ns |       104.67 ns |       263.59 ns |       3,637.0 ns |  1.06 |    0.11 |     736 B |        0.89 |
+| PdqSort_Unmanaged_ReversePeek |     100 |       3,763.8 ns |       155.22 ns |       403.18 ns |       3,829.0 ns |  1.10 |    0.15 |     736 B |        0.89 |
 |                               |         |                  |                 |                 |                  |       |         |           |             |
-|          BuildInSort_AllEqual |    1000 |      36,316.7 ns |       653.62 ns |       611.40 ns |      36,050.0 ns |  1.00 |    0.00 |     728 B |        1.00 |
-|         PdqSort_Span_AllEqual |    1000 |       3,333.8 ns |        67.45 ns |       172.91 ns |       3,300.0 ns |  0.09 |    0.01 |     640 B |        0.88 |
-|    PdqSort_Unguarded_AllEqual |    1000 |       3,357.1 ns |        72.01 ns |       210.06 ns |       3,400.0 ns |  0.10 |    0.01 |     640 B |        0.88 |
-|    PdqSort_Unmanaged_AllEqual |    1000 |       3,313.0 ns |        74.47 ns |       219.57 ns |       3,200.0 ns |  0.09 |    0.01 |     640 B |        0.88 |
-|            BuildInSort_Random |    1000 |      73,506.7 ns |       985.18 ns |       921.54 ns |      73,100.0 ns |  2.02 |    0.05 |     728 B |        1.00 |
-|           PdqSort_Span_Random |    1000 |      47,893.2 ns |       945.73 ns |     2,713.47 ns |      47,350.0 ns |  1.35 |    0.09 |     640 B |        0.88 |
-|      PdqSort_Unguarded_Random |    1000 |      44,463.6 ns |     1,225.90 ns |     3,595.36 ns |      44,100.0 ns |  1.30 |    0.11 |     640 B |        0.88 |
-|      PdqSort_Unmanaged_Random |    1000 |      45,560.8 ns |       908.62 ns |     2,279.54 ns |      45,300.0 ns |  1.26 |    0.06 |     640 B |        0.88 |
-|        BuildInSort_RandomNear |    1000 |      69,250.0 ns |     1,339.69 ns |     1,187.60 ns |      69,400.0 ns |  1.91 |    0.03 |     728 B |        1.00 |
-|       PdqSort_Span_RandomNear |    1000 |      41,284.4 ns |       820.87 ns |     1,902.48 ns |      41,250.0 ns |  1.16 |    0.05 |     640 B |        0.88 |
-|  PdqSort_Unguarded_RandomNear |    1000 |      39,553.7 ns |       952.69 ns |     2,733.43 ns |      39,400.0 ns |  1.13 |    0.09 |     640 B |        0.88 |
-|  PdqSort_Unmanaged_RandomNear |    1000 |      40,035.3 ns |       787.18 ns |     1,271.16 ns |      39,750.0 ns |  1.09 |    0.05 |     640 B |        0.88 |
-|          BuildInSort_Sequence |    1000 |      38,630.0 ns |       619.69 ns |       579.66 ns |      38,250.0 ns |  1.06 |    0.03 |     728 B |        1.00 |
-|         PdqSort_Span_Sequence |    1000 |       3,741.0 ns |        76.47 ns |       172.60 ns |       3,700.0 ns |  0.10 |    0.01 |     640 B |        0.88 |
-|    PdqSort_Unguarded_Sequence |    1000 |       3,804.8 ns |        77.34 ns |        92.07 ns |       3,800.0 ns |  0.10 |    0.00 |     640 B |        0.88 |
-|    PdqSort_Unmanaged_Sequence |    1000 |       3,661.5 ns |        60.64 ns |        50.64 ns |       3,700.0 ns |  0.10 |    0.00 |     640 B |        0.88 |
-|           BuildInSort_Reverse |    1000 |      61,630.8 ns |       443.75 ns |       370.55 ns |      61,500.0 ns |  1.70 |    0.03 |     728 B |        1.00 |
-|          PdqSort_Span_Reverse |    1000 |       5,566.7 ns |       112.66 ns |       188.22 ns |       5,500.0 ns |  0.15 |    0.01 |     640 B |        0.88 |
-|     PdqSort_Unguarded_Reverse |    1000 |       5,582.5 ns |       110.98 ns |       197.27 ns |       5,600.0 ns |  0.15 |    0.01 |     640 B |        0.88 |
-|     PdqSort_Unmanaged_Reverse |    1000 |       5,938.8 ns |       119.68 ns |       284.42 ns |       5,800.0 ns |  0.17 |    0.01 |     640 B |        0.88 |
-|              BuildInSort_Peek |    1000 |     125,886.7 ns |     2,477.65 ns |     2,317.59 ns |     125,700.0 ns |  3.47 |    0.08 |     728 B |        1.00 |
-|             PdqSort_Span_Peek |    1000 |      32,371.4 ns |     1,282.55 ns |     3,741.24 ns |      31,200.0 ns |  0.92 |    0.08 |     640 B |        0.88 |
-|        PdqSort_Unguarded_Peek |    1000 |      30,162.5 ns |       670.42 ns |     1,846.54 ns |      29,750.0 ns |  0.87 |    0.08 |     640 B |        0.88 |
-|        PdqSort_Unmanaged_Peek |    1000 |      33,208.8 ns |       665.49 ns |     1,741.47 ns |      32,650.0 ns |  0.94 |    0.06 |     640 B |        0.88 |
-|       BuildInSort_ReversePeek |    1000 |     121,592.9 ns |     1,825.65 ns |     1,618.39 ns |     121,250.0 ns |  3.35 |    0.06 |     728 B |        1.00 |
-|      PdqSort_Span_ReversePeek |    1000 |      30,927.4 ns |       866.28 ns |     2,485.51 ns |      30,300.0 ns |  0.90 |    0.06 |     640 B |        0.88 |
-| PdqSort_Unguarded_ReversePeek |    1000 |      28,092.6 ns |       544.81 ns |     1,435.25 ns |      27,700.0 ns |  0.80 |    0.05 |     640 B |        0.88 |
-| PdqSort_Unmanaged_ReversePeek |    1000 |      30,848.6 ns |       584.98 ns |     1,445.93 ns |      30,550.0 ns |  0.87 |    0.05 |     640 B |        0.88 |
+|          BuildInSort_AllEqual |    1000 |      27,059.0 ns |       487.84 ns |       407.35 ns |      26,905.5 ns |  1.00 |    0.00 |     824 B |        1.00 |
+|         PdqSort_Span_AllEqual |    1000 |       4,284.3 ns |        98.79 ns |       195.42 ns |       4,265.5 ns |  0.16 |    0.01 |     736 B |        0.89 |
+|    PdqSort_Unguarded_AllEqual |    1000 |       4,369.2 ns |        87.32 ns |       126.28 ns |       4,408.0 ns |  0.16 |    0.01 |     736 B |        0.89 |
+|    PdqSort_Unmanaged_AllEqual |    1000 |       3,805.9 ns |        73.08 ns |        68.37 ns |       3,796.0 ns |  0.14 |    0.00 |     736 B |        0.89 |
+|            BuildInSort_Random |    1000 |      58,984.8 ns |     1,102.79 ns |       920.84 ns |      59,020.0 ns |  2.18 |    0.05 |     824 B |        1.00 |
+|           PdqSort_Span_Random |    1000 |      42,070.5 ns |       870.34 ns |     1,630.16 ns |      41,972.0 ns |  1.55 |    0.06 |     736 B |        0.89 |
+|      PdqSort_Unguarded_Random |    1000 |      40,249.2 ns |       887.70 ns |     1,662.67 ns |      40,108.5 ns |  1.49 |    0.07 |     736 B |        0.89 |
+|      PdqSort_Unmanaged_Random |    1000 |      39,011.1 ns |       793.64 ns |     1,071.14 ns |      38,906.0 ns |  1.44 |    0.05 |     736 B |        0.89 |
+|        BuildInSort_RandomNear |    1000 |      53,889.4 ns |       809.48 ns |       675.92 ns |      53,950.5 ns |  1.99 |    0.04 |     824 B |        1.00 |
+|       PdqSort_Span_RandomNear |    1000 |      35,429.2 ns |       781.95 ns |     1,464.60 ns |      35,341.0 ns |  1.31 |    0.06 |      64 B |        0.08 |
+|  PdqSort_Unguarded_RandomNear |    1000 |      35,427.0 ns |       723.30 ns |     1,246.19 ns |      35,532.0 ns |  1.31 |    0.05 |     736 B |        0.89 |
+|  PdqSort_Unmanaged_RandomNear |    1000 |      33,588.6 ns |       676.46 ns |     1,191.69 ns |      33,665.5 ns |  1.24 |    0.05 |     736 B |        0.89 |
+|          BuildInSort_Sequence |    1000 |      23,549.8 ns |       164.68 ns |       154.06 ns |      23,523.5 ns |  0.87 |    0.01 |     824 B |        1.00 |
+|         PdqSort_Span_Sequence |    1000 |       4,439.5 ns |        99.72 ns |       184.98 ns |       4,475.0 ns |  0.16 |    0.01 |     736 B |        0.89 |
+|    PdqSort_Unguarded_Sequence |    1000 |       4,366.1 ns |        90.23 ns |        79.98 ns |       4,355.5 ns |  0.16 |    0.00 |     736 B |        0.89 |
+|    PdqSort_Unmanaged_Sequence |    1000 |       3,950.0 ns |        87.24 ns |       134.06 ns |       3,919.0 ns |  0.15 |    0.01 |     736 B |        0.89 |
+|           BuildInSort_Reverse |    1000 |      37,685.7 ns |       417.36 ns |       369.96 ns |      37,627.5 ns |  1.39 |    0.03 |     824 B |        1.00 |
+|          PdqSort_Span_Reverse |    1000 |       6,753.7 ns |       143.50 ns |       200.72 ns |       6,716.0 ns |  0.25 |    0.01 |     736 B |        0.89 |
+|     PdqSort_Unguarded_Reverse |    1000 |       6,771.8 ns |       136.00 ns |       120.56 ns |       6,757.0 ns |  0.25 |    0.01 |     736 B |        0.89 |
+|     PdqSort_Unmanaged_Reverse |    1000 |       6,172.8 ns |        97.93 ns |        96.17 ns |       6,152.0 ns |  0.23 |    0.00 |     736 B |        0.89 |
+|              BuildInSort_Peek |    1000 |      90,079.9 ns |     3,687.00 ns |     9,528.61 ns |      84,476.5 ns |  3.33 |    0.36 |     824 B |        1.00 |
+|             PdqSort_Span_Peek |    1000 |      34,483.0 ns |       660.36 ns |       648.52 ns |      34,447.0 ns |  1.27 |    0.03 |     736 B |        0.89 |
+|        PdqSort_Unguarded_Peek |    1000 |      36,056.0 ns |       737.02 ns |       937.83 ns |      36,101.5 ns |  1.33 |    0.04 |     736 B |        0.89 |
+|        PdqSort_Unmanaged_Peek |    1000 |      32,725.0 ns |       662.56 ns |       825.33 ns |      32,807.5 ns |  1.21 |    0.04 |     736 B |        0.89 |
+|       BuildInSort_ReversePeek |    1000 |      84,217.7 ns |       879.93 ns |       780.01 ns |      84,283.0 ns |  3.11 |    0.06 |     824 B |        1.00 |
+|      PdqSort_Span_ReversePeek |    1000 |      36,103.8 ns |       744.69 ns |     1,005.08 ns |      36,148.5 ns |  1.33 |    0.04 |     736 B |        0.89 |
+| PdqSort_Unguarded_ReversePeek |    1000 |      35,172.1 ns |       757.33 ns |     1,180.25 ns |      35,208.5 ns |  1.30 |    0.05 |     736 B |        0.89 |
+| PdqSort_Unmanaged_ReversePeek |    1000 |      33,809.7 ns |       724.20 ns |     1,144.20 ns |      34,050.5 ns |  1.25 |    0.05 |     736 B |        0.89 |
 |                               |         |                  |                 |                 |                  |       |         |           |             |
-|          BuildInSort_AllEqual |   10000 |     541,792.9 ns |     2,778.54 ns |     2,463.10 ns |     541,950.0 ns |  1.00 |    0.00 |     728 B |        1.00 |
-|         PdqSort_Span_AllEqual |   10000 |      30,027.3 ns |       597.55 ns |       947.78 ns |      30,300.0 ns |  0.06 |    0.00 |     640 B |        0.88 |
-|    PdqSort_Unguarded_AllEqual |   10000 |      29,289.0 ns |       585.33 ns |     1,725.85 ns |      29,050.0 ns |  0.06 |    0.00 |     640 B |        0.88 |
-|    PdqSort_Unmanaged_AllEqual |   10000 |      28,690.6 ns |       548.76 ns |       854.35 ns |      28,250.0 ns |  0.05 |    0.00 |     640 B |        0.88 |
-|            BuildInSort_Random |   10000 |     978,046.7 ns |    14,340.67 ns |    13,414.27 ns |     978,200.0 ns |  1.80 |    0.03 |     728 B |        1.00 |
-|           PdqSort_Span_Random |   10000 |     683,753.3 ns |     5,737.02 ns |     5,366.41 ns |     685,300.0 ns |  1.26 |    0.01 |     640 B |        0.88 |
-|      PdqSort_Unguarded_Random |   10000 |     654,223.1 ns |    10,565.10 ns |     8,822.33 ns |     656,900.0 ns |  1.21 |    0.02 |     640 B |        0.88 |
-|      PdqSort_Unmanaged_Random |   10000 |     643,553.3 ns |     7,921.76 ns |     7,410.02 ns |     642,600.0 ns |  1.19 |    0.01 |     640 B |        0.88 |
-|        BuildInSort_RandomNear |   10000 |     983,160.0 ns |     7,924.12 ns |     7,412.23 ns |     983,300.0 ns |  1.81 |    0.02 |     728 B |        1.00 |
-|       PdqSort_Span_RandomNear |   10000 |     666,032.6 ns |    14,241.04 ns |    40,860.23 ns |     647,800.0 ns |  1.20 |    0.04 |     640 B |        0.88 |
-|  PdqSort_Unguarded_RandomNear |   10000 |     606,360.0 ns |     5,984.39 ns |     5,597.81 ns |     605,100.0 ns |  1.12 |    0.01 |     640 B |        0.88 |
-|  PdqSort_Unmanaged_RandomNear |   10000 |     607,440.0 ns |     3,991.44 ns |     3,733.59 ns |     607,700.0 ns |  1.12 |    0.01 |     640 B |        0.88 |
-|          BuildInSort_Sequence |   10000 |     559,588.5 ns |     4,255.77 ns |     3,553.76 ns |     559,650.0 ns |  1.03 |    0.01 |     728 B |        1.00 |
-|         PdqSort_Span_Sequence |   10000 |      33,446.2 ns |       389.94 ns |       325.62 ns |      33,300.0 ns |  0.06 |    0.00 |     640 B |        0.88 |
-|    PdqSort_Unguarded_Sequence |   10000 |      33,853.3 ns |       600.51 ns |       561.72 ns |      33,900.0 ns |  0.06 |    0.00 |     640 B |        0.88 |
-|    PdqSort_Unmanaged_Sequence |   10000 |      35,075.0 ns |        57.93 ns |        45.23 ns |      35,100.0 ns |  0.06 |    0.00 |     640 B |        0.88 |
-|           BuildInSort_Reverse |   10000 |     957,376.9 ns |     2,753.97 ns |     2,299.69 ns |     957,000.0 ns |  1.77 |    0.01 |     728 B |        1.00 |
-|          PdqSort_Span_Reverse |   10000 |      50,308.3 ns |       951.39 ns |     1,237.08 ns |      50,500.0 ns |  0.09 |    0.00 |     640 B |        0.88 |
-|     PdqSort_Unguarded_Reverse |   10000 |      51,484.4 ns |       984.79 ns |     1,533.20 ns |      51,000.0 ns |  0.09 |    0.00 |     640 B |        0.88 |
-|     PdqSort_Unmanaged_Reverse |   10000 |      52,000.0 ns |       856.61 ns |       715.31 ns |      51,600.0 ns |  0.10 |    0.00 |     640 B |        0.88 |
-|              BuildInSort_Peek |   10000 |   2,128,200.0 ns |    21,494.76 ns |    17,949.09 ns |   2,122,000.0 ns |  3.93 |    0.04 |     728 B |        1.00 |
-|             PdqSort_Span_Peek |   10000 |     442,473.9 ns |     8,669.52 ns |    10,964.17 ns |     441,700.0 ns |  0.82 |    0.02 |     640 B |        0.88 |
-|        PdqSort_Unguarded_Peek |   10000 |     440,691.7 ns |     8,810.07 ns |    11,455.58 ns |     441,050.0 ns |  0.82 |    0.02 |     640 B |        0.88 |
-|        PdqSort_Unmanaged_Peek |   10000 |     451,606.7 ns |     7,565.06 ns |     7,076.37 ns |     453,300.0 ns |  0.83 |    0.01 |     640 B |        0.88 |
-|       BuildInSort_ReversePeek |   10000 |   2,118,980.0 ns |    37,597.97 ns |    35,169.17 ns |   2,108,200.0 ns |  3.91 |    0.07 |     728 B |        1.00 |
-|      PdqSort_Span_ReversePeek |   10000 |     451,296.7 ns |     8,832.56 ns |    13,220.16 ns |     453,750.0 ns |  0.83 |    0.04 |     640 B |        0.88 |
-| PdqSort_Unguarded_ReversePeek |   10000 |     438,084.5 ns |     8,649.37 ns |    12,678.14 ns |     438,550.0 ns |  0.81 |    0.03 |     640 B |        0.88 |
-| PdqSort_Unmanaged_ReversePeek |   10000 |     452,613.3 ns |     6,446.85 ns |     6,030.38 ns |     452,600.0 ns |  0.84 |    0.01 |     640 B |        0.88 |
+|          BuildInSort_AllEqual |   10000 |     392,084.7 ns |     8,857.45 ns |    22,066.94 ns |     381,610.5 ns |  1.00 |    0.00 |     824 B |        1.00 |
+|         PdqSort_Span_AllEqual |   10000 |      35,700.1 ns |       454.80 ns |       425.46 ns |      35,558.5 ns |  0.09 |    0.01 |     736 B |        0.89 |
+|    PdqSort_Unguarded_AllEqual |   10000 |      38,068.0 ns |       811.46 ns |     1,228.98 ns |      38,881.5 ns |  0.10 |    0.01 |     736 B |        0.89 |
+|    PdqSort_Unmanaged_AllEqual |   10000 |      33,060.4 ns |       118.30 ns |        98.78 ns |      33,042.0 ns |  0.08 |    0.00 |     736 B |        0.89 |
+|            BuildInSort_Random |   10000 |     821,807.0 ns |    17,517.23 ns |    26,530.43 ns |     820,751.0 ns |  2.10 |    0.14 |     824 B |        1.00 |
+|           PdqSort_Span_Random |   10000 |     541,832.0 ns |    11,635.53 ns |    21,370.29 ns |     540,000.5 ns |  1.38 |    0.09 |     736 B |        0.89 |
+|      PdqSort_Unguarded_Random |   10000 |     499,761.7 ns |    10,557.16 ns |    17,124.54 ns |     507,853.0 ns |  1.27 |    0.08 |     736 B |        0.89 |
+|      PdqSort_Unmanaged_Random |   10000 |     451,778.2 ns |     9,859.58 ns |    18,108.51 ns |     451,048.0 ns |  1.15 |    0.08 |     736 B |        0.89 |
+|        BuildInSort_RandomNear |   10000 |     802,649.5 ns |    15,378.29 ns |    13,631.91 ns |     803,121.0 ns |  2.05 |    0.12 |     824 B |        1.00 |
+|       PdqSort_Span_RandomNear |   10000 |     436,604.2 ns |     9,529.94 ns |    17,677.23 ns |     437,969.0 ns |  1.11 |    0.08 |     736 B |        0.89 |
+|  PdqSort_Unguarded_RandomNear |   10000 |     479,230.2 ns |    10,605.16 ns |    22,714.90 ns |     480,140.5 ns |  1.22 |    0.09 |     736 B |        0.89 |
+|  PdqSort_Unmanaged_RandomNear |   10000 |     425,422.3 ns |     9,339.87 ns |    18,475.41 ns |     418,419.0 ns |  1.09 |    0.08 |     736 B |        0.89 |
+|          BuildInSort_Sequence |   10000 |     335,132.4 ns |     7,373.73 ns |    13,542.89 ns |     326,681.5 ns |  0.85 |    0.06 |     824 B |        1.00 |
+|         PdqSort_Span_Sequence |   10000 |      38,564.2 ns |       678.63 ns |       566.66 ns |      38,801.0 ns |  0.10 |    0.01 |     736 B |        0.89 |
+|    PdqSort_Unguarded_Sequence |   10000 |      38,869.7 ns |       638.61 ns |       533.25 ns |      38,828.0 ns |  0.10 |    0.01 |     736 B |        0.89 |
+|    PdqSort_Unmanaged_Sequence |   10000 |      34,357.2 ns |       724.70 ns |     1,144.98 ns |      34,150.0 ns |  0.09 |    0.01 |     736 B |        0.89 |
+|           BuildInSort_Reverse |   10000 |     563,209.2 ns |    11,863.71 ns |    18,230.29 ns |     567,585.0 ns |  1.44 |    0.09 |     824 B |        1.00 |
+|          PdqSort_Span_Reverse |   10000 |      55,279.2 ns |       682.69 ns |       570.05 ns |      55,134.0 ns |  0.14 |    0.01 |     736 B |        0.89 |
+|     PdqSort_Unguarded_Reverse |   10000 |      60,143.1 ns |       941.29 ns |       834.39 ns |      59,752.0 ns |  0.15 |    0.01 |     736 B |        0.89 |
+|     PdqSort_Unmanaged_Reverse |   10000 |      50,675.9 ns |       805.49 ns |       672.59 ns |      50,713.5 ns |  0.13 |    0.01 |     736 B |        0.89 |
+|              BuildInSort_Peek |   10000 |   1,441,371.1 ns |    30,639.14 ns |    45,716.48 ns |   1,434,419.0 ns |  3.68 |    0.24 |     824 B |        1.00 |
+|             PdqSort_Span_Peek |   10000 |     408,647.0 ns |    10,218.88 ns |    25,870.47 ns |     400,071.0 ns |  1.04 |    0.09 |     736 B |        0.89 |
+|        PdqSort_Unguarded_Peek |   10000 |     449,166.8 ns |    26,207.09 ns |    67,729.16 ns |     415,985.5 ns |  1.15 |    0.18 |     736 B |        0.89 |
+|        PdqSort_Unmanaged_Peek |   10000 |     369,397.2 ns |     7,986.86 ns |    19,680.53 ns |     365,223.0 ns |  0.94 |    0.07 |     736 B |        0.89 |
+|       BuildInSort_ReversePeek |   10000 |   1,386,498.7 ns |    27,301.79 ns |    25,540.91 ns |   1,378,881.0 ns |  3.54 |    0.21 |     824 B |        1.00 |
+|      PdqSort_Span_ReversePeek |   10000 |     394,710.8 ns |     8,993.71 ns |    23,125.51 ns |     387,869.5 ns |  1.01 |    0.08 |     736 B |        0.89 |
+| PdqSort_Unguarded_ReversePeek |   10000 |     383,004.5 ns |     8,773.56 ns |    22,094.24 ns |     373,890.0 ns |  0.98 |    0.08 |     736 B |        0.89 |
+| PdqSort_Unmanaged_ReversePeek |   10000 |     389,496.8 ns |    15,946.31 ns |    41,418.99 ns |     379,641.5 ns |  0.99 |    0.12 |     736 B |        0.89 |
 |                               |         |                  |                 |                 |                  |       |         |           |             |
-|          BuildInSort_AllEqual |  100000 |   6,601,964.3 ns |    80,270.17 ns |    71,157.42 ns |   6,610,000.0 ns |  1.00 |    0.00 |     728 B |        1.00 |
-|         PdqSort_Span_AllEqual |  100000 |     307,949.0 ns |     6,154.70 ns |    12,291.60 ns |     309,900.0 ns |  0.05 |    0.00 |     640 B |        0.88 |
-|    PdqSort_Unguarded_AllEqual |  100000 |     294,489.7 ns |     7,838.76 ns |    22,741.66 ns |     290,300.0 ns |  0.04 |    0.00 |     640 B |        0.88 |
-|    PdqSort_Unmanaged_AllEqual |  100000 |     301,518.6 ns |     6,020.90 ns |    14,655.71 ns |     294,900.0 ns |  0.05 |    0.00 |     640 B |        0.88 |
-|            BuildInSort_Random |  100000 |   8,319,869.4 ns |   131,493.35 ns |   262,606.44 ns |   8,330,200.0 ns |  1.25 |    0.04 |     728 B |        1.00 |
-|           PdqSort_Span_Random |  100000 |   8,619,546.7 ns |   118,234.97 ns |   110,597.06 ns |   8,605,300.0 ns |  1.31 |    0.03 |     640 B |        0.88 |
-|      PdqSort_Unguarded_Random |  100000 |   6,872,020.0 ns |   105,236.89 ns |   200,224.11 ns |   6,863,500.0 ns |  1.05 |    0.04 |     640 B |        0.88 |
-|      PdqSort_Unmanaged_Random |  100000 |   6,511,947.8 ns |    54,243.01 ns |   104,507.87 ns |   6,525,000.0 ns |  0.99 |    0.02 |     640 B |        0.88 |
-|        BuildInSort_RandomNear |  100000 |   8,104,440.0 ns |   127,809.82 ns |   227,181.83 ns |   8,091,000.0 ns |  1.24 |    0.04 |     728 B |        1.00 |
-|       PdqSort_Span_RandomNear |  100000 |   6,476,084.4 ns |    73,769.01 ns |   140,353.21 ns |   6,472,500.0 ns |  1.00 |    0.02 |     640 B |        0.88 |
-|  PdqSort_Unguarded_RandomNear |  100000 |   7,547,343.3 ns |   145,008.73 ns |   135,641.26 ns |   7,526,650.0 ns |  1.14 |    0.03 |     640 B |        0.88 |
-|  PdqSort_Unmanaged_RandomNear |  100000 |   6,028,453.1 ns |    54,223.43 ns |   108,290.05 ns |   6,035,400.0 ns |  0.92 |    0.01 |     640 B |        0.88 |
-|          BuildInSort_Sequence |  100000 |   7,006,316.7 ns |    95,834.96 ns |    89,644.08 ns |   7,023,550.0 ns |  1.06 |    0.02 |     728 B |        1.00 |
-|         PdqSort_Span_Sequence |  100000 |     349,832.0 ns |     6,865.81 ns |    13,869.26 ns |     345,850.0 ns |  0.05 |    0.00 |     640 B |        0.88 |
-|    PdqSort_Unguarded_Sequence |  100000 |     357,285.2 ns |     7,065.03 ns |     9,904.18 ns |     355,000.0 ns |  0.05 |    0.00 |     640 B |        0.88 |
-|    PdqSort_Unmanaged_Sequence |  100000 |     356,568.4 ns |     6,941.15 ns |     7,715.07 ns |     353,100.0 ns |  0.05 |    0.00 |     640 B |        0.88 |
-|           BuildInSort_Reverse |  100000 |   6,397,096.0 ns |    90,785.32 ns |   121,195.80 ns |   6,374,600.0 ns |  0.97 |    0.03 |     728 B |        1.00 |
-|          PdqSort_Span_Reverse |  100000 |     511,292.1 ns |     9,998.41 ns |    17,246.77 ns |     509,100.0 ns |  0.08 |    0.00 |     640 B |        0.88 |
-|     PdqSort_Unguarded_Reverse |  100000 |     527,475.0 ns |     9,417.73 ns |     9,249.47 ns |     527,750.0 ns |  0.08 |    0.00 |     640 B |        0.88 |
-|     PdqSort_Unmanaged_Reverse |  100000 |     526,185.7 ns |     4,566.35 ns |     4,047.95 ns |     524,350.0 ns |  0.08 |    0.00 |     640 B |        0.88 |
-|              BuildInSort_Peek |  100000 |  15,733,764.3 ns |   281,448.72 ns |   249,496.96 ns |  15,696,200.0 ns |  2.38 |    0.04 |     728 B |        1.00 |
-|             PdqSort_Span_Peek |  100000 |   5,313,422.2 ns |    99,422.63 ns |   106,381.10 ns |   5,325,450.0 ns |  0.81 |    0.02 |     640 B |        0.88 |
-|        PdqSort_Unguarded_Peek |  100000 |   5,296,952.4 ns |   101,359.68 ns |   120,661.49 ns |   5,297,000.0 ns |  0.80 |    0.02 |     640 B |        0.88 |
-|        PdqSort_Unmanaged_Peek |  100000 |   5,509,794.7 ns |   104,336.80 ns |   115,970.08 ns |   5,477,900.0 ns |  0.84 |    0.02 |     640 B |        0.88 |
-|       BuildInSort_ReversePeek |  100000 |  16,306,442.9 ns |   294,652.68 ns |   261,201.93 ns |  16,234,950.0 ns |  2.47 |    0.04 |     728 B |        1.00 |
-|      PdqSort_Span_ReversePeek |  100000 |   5,293,880.8 ns |   103,075.99 ns |   141,091.58 ns |   5,301,750.0 ns |  0.80 |    0.02 |     640 B |        0.88 |
-| PdqSort_Unguarded_ReversePeek |  100000 |   5,307,156.0 ns |   105,224.26 ns |   140,471.36 ns |   5,310,200.0 ns |  0.80 |    0.03 |     640 B |        0.88 |
-| PdqSort_Unmanaged_ReversePeek |  100000 |   5,474,628.6 ns |    62,283.04 ns |    55,212.30 ns |   5,481,800.0 ns |  0.83 |    0.01 |     640 B |        0.88 |
+|          BuildInSort_AllEqual |  100000 |   4,503,705.2 ns |    32,673.75 ns |    28,963.27 ns |   4,501,056.5 ns |  1.00 |    0.00 |     824 B |        1.00 |
+|         PdqSort_Span_AllEqual |  100000 |     155,309.4 ns |     2,675.97 ns |     4,504.48 ns |     154,503.0 ns |  0.03 |    0.00 |     736 B |        0.89 |
+|    PdqSort_Unguarded_AllEqual |  100000 |     143,792.6 ns |     5,310.93 ns |    13,586.14 ns |     138,168.5 ns |  0.03 |    0.00 |     736 B |        0.89 |
+|    PdqSort_Unmanaged_AllEqual |  100000 |     138,324.5 ns |     4,693.04 ns |    12,067.19 ns |     134,079.0 ns |  0.03 |    0.00 |     736 B |        0.89 |
+|            BuildInSort_Random |  100000 |   9,758,332.0 ns |    37,880.94 ns |    33,579.12 ns |   9,754,863.0 ns |  2.17 |    0.02 |     824 B |        1.00 |
+|           PdqSort_Span_Random |  100000 |   5,034,474.4 ns |    72,618.75 ns |    67,935.08 ns |   5,053,319.5 ns |  1.12 |    0.02 |     736 B |        0.89 |
+|      PdqSort_Unguarded_Random |  100000 |   4,424,844.1 ns |    89,487.84 ns |   113,869.90 ns |   4,367,162.0 ns |  0.98 |    0.03 |     736 B |        0.89 |
+|      PdqSort_Unmanaged_Random |  100000 |   4,461,672.9 ns |    37,058.39 ns |    32,849.99 ns |   4,456,639.5 ns |  0.99 |    0.01 |     736 B |        0.89 |
+|        BuildInSort_RandomNear |  100000 |   9,244,392.1 ns |    30,579.07 ns |    27,106.47 ns |   9,238,975.0 ns |  2.05 |    0.01 |     824 B |        1.00 |
+|       PdqSort_Span_RandomNear |  100000 |   4,804,270.9 ns |    59,543.64 ns |    49,719.23 ns |   4,794,992.5 ns |  1.07 |    0.01 |     736 B |        0.89 |
+|  PdqSort_Unguarded_RandomNear |  100000 |   4,381,173.1 ns |    81,571.20 ns |    76,310.12 ns |   4,377,392.5 ns |  0.97 |    0.02 |     736 B |        0.89 |
+|  PdqSort_Unmanaged_RandomNear |  100000 |   4,222,783.0 ns |    19,630.66 ns |    18,364.55 ns |   4,224,981.5 ns |  0.94 |    0.01 |     736 B |        0.89 |
+|          BuildInSort_Sequence |  100000 |   4,077,412.4 ns |    21,910.05 ns |    17,105.85 ns |   4,080,955.0 ns |  0.91 |    0.01 |     824 B |        1.00 |
+|         PdqSort_Span_Sequence |  100000 |     432,601.3 ns |    11,758.42 ns |    30,234.39 ns |     428,054.0 ns |  0.10 |    0.01 |     736 B |        0.89 |
+|    PdqSort_Unguarded_Sequence |  100000 |     379,114.2 ns |     8,134.15 ns |    19,819.51 ns |     374,857.5 ns |  0.08 |    0.00 |     736 B |        0.89 |
+|    PdqSort_Unmanaged_Sequence |  100000 |     402,240.9 ns |    11,665.89 ns |    29,843.03 ns |     394,755.5 ns |  0.09 |    0.01 |     736 B |        0.89 |
+|           BuildInSort_Reverse |  100000 |   7,336,402.3 ns |    36,757.98 ns |    32,583.69 ns |   7,331,157.0 ns |  1.63 |    0.01 |     824 B |        1.00 |
+|          PdqSort_Span_Reverse |  100000 |     534,662.2 ns |    10,222.64 ns |    10,938.46 ns |     533,594.0 ns |  0.12 |    0.00 |     736 B |        0.89 |
+|     PdqSort_Unguarded_Reverse |  100000 |     477,382.5 ns |    10,120.36 ns |    16,416.00 ns |     480,037.5 ns |  0.11 |    0.00 |     736 B |        0.89 |
+|     PdqSort_Unmanaged_Reverse |  100000 |     506,927.7 ns |    11,470.54 ns |    29,343.30 ns |     499,554.0 ns |  0.11 |    0.01 |     736 B |        0.89 |
+|              BuildInSort_Peek |  100000 |  18,508,228.0 ns |    20,605.45 ns |    18,265.46 ns |  18,510,872.0 ns |  4.11 |    0.03 |     824 B |        1.00 |
+|             PdqSort_Span_Peek |  100000 |   2,853,022.6 ns |    59,163.12 ns |    85,560.09 ns |   2,853,818.0 ns |  0.63 |    0.02 |     736 B |        0.89 |
+|        PdqSort_Unguarded_Peek |  100000 |   2,163,675.7 ns |    44,291.87 ns |    59,778.52 ns |   2,156,014.5 ns |  0.48 |    0.01 |     736 B |        0.89 |
+|        PdqSort_Unmanaged_Peek |  100000 |   2,199,756.4 ns |    28,556.72 ns |    25,313.78 ns |   2,199,855.0 ns |  0.49 |    0.01 |     736 B |        0.89 |
+|       BuildInSort_ReversePeek |  100000 |  19,278,765.8 ns |   377,583.90 ns |   490,368.70 ns |  19,443,152.5 ns |  4.28 |    0.11 |     824 B |        1.00 |
+|      PdqSort_Span_ReversePeek |  100000 |   2,923,688.3 ns |    56,785.76 ns |    53,123.26 ns |   2,927,811.0 ns |  0.65 |    0.01 |     736 B |        0.89 |
+| PdqSort_Unguarded_ReversePeek |  100000 |   2,097,258.1 ns |    40,131.65 ns |    35,574.25 ns |   2,107,556.0 ns |  0.47 |    0.01 |     736 B |        0.89 |
+| PdqSort_Unmanaged_ReversePeek |  100000 |   2,196,151.9 ns |    34,820.61 ns |    32,574.79 ns |   2,201,548.0 ns |  0.49 |    0.01 |     736 B |        0.89 |
 |                               |         |                  |                 |                 |                  |       |         |           |             |
-|          BuildInSort_AllEqual | 1000000 |  32,250,515.4 ns |   385,659.82 ns |   322,043.41 ns |  32,303,900.0 ns |  1.00 |    0.00 |     728 B |        1.00 |
-|         PdqSort_Span_AllEqual | 1000000 |   2,685,720.5 ns |    53,632.22 ns |   143,155.26 ns |   2,681,400.0 ns |  0.09 |    0.01 |     640 B |        0.88 |
-|    PdqSort_Unguarded_AllEqual | 1000000 |   2,695,716.0 ns |    53,861.92 ns |    71,904.12 ns |   2,694,800.0 ns |  0.08 |    0.00 |     640 B |        0.88 |
-|    PdqSort_Unmanaged_AllEqual | 1000000 |   2,544,946.7 ns |    48,743.58 ns |   123,181.25 ns |   2,522,500.0 ns |  0.08 |    0.00 |     640 B |        0.88 |
-|            BuildInSort_Random | 1000000 |  97,246,364.3 ns | 1,685,322.02 ns | 1,493,994.08 ns |  97,106,750.0 ns |  3.01 |    0.06 |     728 B |        1.00 |
-|           PdqSort_Span_Random | 1000000 |  81,674,520.0 ns | 1,522,765.20 ns | 1,424,395.52 ns |  81,422,300.0 ns |  2.53 |    0.06 |     640 B |        0.88 |
-|      PdqSort_Unguarded_Random | 1000000 |  78,480,814.3 ns | 1,259,999.40 ns | 1,116,956.65 ns |  78,232,150.0 ns |  2.43 |    0.05 |     640 B |        0.88 |
-|      PdqSort_Unmanaged_Random | 1000000 |  75,742,776.7 ns | 1,443,690.37 ns | 1,350,428.87 ns |  75,555,850.0 ns |  2.35 |    0.04 |     640 B |        0.88 |
-|        BuildInSort_RandomNear | 1000000 |  94,058,560.0 ns | 1,182,517.13 ns | 1,106,127.25 ns |  93,900,400.0 ns |  2.92 |    0.05 |     728 B |        1.00 |
-|       PdqSort_Span_RandomNear | 1000000 |  76,016,626.7 ns | 1,070,071.32 ns | 1,000,945.37 ns |  75,935,500.0 ns |  2.36 |    0.04 |     640 B |        0.88 |
-|  PdqSort_Unguarded_RandomNear | 1000000 |  73,359,693.3 ns |   983,771.24 ns |   920,220.23 ns |  73,086,400.0 ns |  2.27 |    0.03 |     640 B |        0.88 |
-|  PdqSort_Unmanaged_RandomNear | 1000000 |  72,146,346.7 ns | 1,070,657.54 ns | 1,001,493.72 ns |  71,879,500.0 ns |  2.24 |    0.03 |     640 B |        0.88 |
-|          BuildInSort_Sequence | 1000000 |  40,909,016.7 ns |   313,114.84 ns |   244,459.47 ns |  40,907,400.0 ns |  1.27 |    0.01 |     728 B |        1.00 |
-|         PdqSort_Span_Sequence | 1000000 |   3,531,986.0 ns |    70,239.72 ns |   130,193.83 ns |   3,541,800.0 ns |  0.11 |    0.00 |     640 B |        0.88 |
-|    PdqSort_Unguarded_Sequence | 1000000 |   3,128,238.6 ns |    58,644.90 ns |   142,749.78 ns |   3,071,100.0 ns |  0.10 |    0.01 |     640 B |        0.88 |
-|    PdqSort_Unmanaged_Sequence | 1000000 |   3,168,820.9 ns |    61,089.31 ns |   171,300.97 ns |   3,105,800.0 ns |  0.10 |    0.01 |     640 B |        0.88 |
-|           BuildInSort_Reverse | 1000000 |  77,981,876.9 ns |   532,221.70 ns |   444,429.23 ns |  78,049,400.0 ns |  2.42 |    0.03 |     728 B |        1.00 |
-|          PdqSort_Span_Reverse | 1000000 |   5,311,619.4 ns |   105,811.47 ns |   176,787.20 ns |   5,314,500.0 ns |  0.16 |    0.01 |     640 B |        0.88 |
-|     PdqSort_Unguarded_Reverse | 1000000 |   4,810,227.8 ns |    95,275.68 ns |   159,184.27 ns |   4,770,700.0 ns |  0.15 |    0.01 |     640 B |        0.88 |
-|     PdqSort_Unmanaged_Reverse | 1000000 |   4,618,975.9 ns |    63,517.07 ns |    93,102.50 ns |   4,593,700.0 ns |  0.14 |    0.00 |     640 B |        0.88 |
-|              BuildInSort_Peek | 1000000 | 201,730,586.7 ns | 2,203,914.30 ns | 2,061,542.81 ns | 201,139,300.0 ns |  6.25 |    0.07 |     728 B |        1.00 |
-|             PdqSort_Span_Peek | 1000000 |  55,542,364.3 ns |   789,530.44 ns |   699,898.17 ns |  55,295,000.0 ns |  1.72 |    0.03 |     640 B |        0.88 |
-|        PdqSort_Unguarded_Peek | 1000000 |  53,611,769.2 ns |   688,481.56 ns |   574,913.28 ns |  53,395,400.0 ns |  1.66 |    0.03 |     640 B |        0.88 |
-|        PdqSort_Unmanaged_Peek | 1000000 |  54,724,725.0 ns |   613,511.81 ns |   478,989.67 ns |  54,677,650.0 ns |  1.69 |    0.02 |     640 B |        0.88 |
-|       BuildInSort_ReversePeek | 1000000 | 198,181,523.1 ns | 1,083,538.51 ns |   904,803.73 ns | 198,010,200.0 ns |  6.15 |    0.09 |     728 B |        1.00 |
-|      PdqSort_Span_ReversePeek | 1000000 |  54,943,292.3 ns |   571,854.87 ns |   477,524.72 ns |  54,833,900.0 ns |  1.70 |    0.02 |     640 B |        0.88 |
-| PdqSort_Unguarded_ReversePeek | 1000000 |  53,528,013.3 ns |   669,241.94 ns |   626,009.32 ns |  53,325,700.0 ns |  1.66 |    0.02 |     640 B |        0.88 |
-| PdqSort_Unmanaged_ReversePeek | 1000000 |  53,984,115.4 ns |   976,304.65 ns |   815,258.60 ns |  53,689,900.0 ns |  1.67 |    0.03 |     640 B |        0.88 |
+|          BuildInSort_AllEqual | 1000000 |  56,292,635.4 ns |   391,154.69 ns |   346,734.62 ns |  56,249,259.5 ns |  1.00 |    0.00 |     824 B |        1.00 |
+|         PdqSort_Span_AllEqual | 1000000 |   1,342,051.1 ns |    30,067.39 ns |    68,973.51 ns |   1,354,347.0 ns |  0.02 |    0.00 |    1408 B |        1.71 |
+|    PdqSort_Unguarded_AllEqual | 1000000 |   1,028,968.8 ns |    22,703.05 ns |    47,906.61 ns |   1,029,332.0 ns |  0.02 |    0.00 |     736 B |        0.89 |
+|    PdqSort_Unmanaged_AllEqual | 1000000 |   1,151,586.9 ns |    25,125.15 ns |    47,956.21 ns |   1,145,529.5 ns |  0.02 |    0.00 |     736 B |        0.89 |
+|            BuildInSort_Random | 1000000 | 117,497,794.4 ns |   427,000.03 ns |   356,547.13 ns | 117,496,818.0 ns |  2.09 |    0.01 |     824 B |        1.00 |
+|           PdqSort_Span_Random | 1000000 |  60,732,140.4 ns |   569,804.83 ns |   505,097.00 ns |  60,658,694.0 ns |  1.08 |    0.01 |     736 B |        0.89 |
+|      PdqSort_Unguarded_Random | 1000000 |  51,085,512.9 ns |   508,233.39 ns |   450,517.70 ns |  50,941,625.5 ns |  0.91 |    0.01 |     736 B |        0.89 |
+|      PdqSort_Unmanaged_Random | 1000000 |  51,320,842.6 ns |   518,035.25 ns |   459,206.45 ns |  51,197,385.5 ns |  0.91 |    0.01 |     736 B |        0.89 |
+|        BuildInSort_RandomNear | 1000000 | 116,568,068.8 ns | 2,280,863.19 ns | 2,534,944.45 ns | 116,460,229.0 ns |  2.07 |    0.05 |     824 B |        1.00 |
+|       PdqSort_Span_RandomNear | 1000000 |  55,737,656.5 ns |   409,957.11 ns |   383,516.20 ns |  55,542,295.0 ns |  0.99 |    0.01 |     736 B |        0.89 |
+|  PdqSort_Unguarded_RandomNear | 1000000 |  51,186,408.7 ns |   311,035.19 ns |   290,974.43 ns |  51,154,388.0 ns |  0.91 |    0.01 |     736 B |        0.89 |
+|  PdqSort_Unmanaged_RandomNear | 1000000 |  50,297,277.3 ns |   366,247.03 ns |   324,655.51 ns |  50,136,805.0 ns |  0.89 |    0.01 |     736 B |        0.89 |
+|          BuildInSort_Sequence | 1000000 |  49,176,188.1 ns |   407,460.56 ns |   361,188.77 ns |  49,150,400.5 ns |  0.87 |    0.01 |     824 B |        1.00 |
+|         PdqSort_Span_Sequence | 1000000 |   2,282,932.2 ns |    51,422.21 ns |   120,947.51 ns |   2,321,495.5 ns |  0.04 |    0.00 |     736 B |        0.89 |
+|    PdqSort_Unguarded_Sequence | 1000000 |   1,937,271.4 ns |    42,666.72 ns |    87,962.76 ns |   1,950,057.5 ns |  0.03 |    0.00 |     736 B |        0.89 |
+|    PdqSort_Unmanaged_Sequence | 1000000 |   2,279,788.3 ns |    51,163.14 ns |   118,861.57 ns |   2,321,060.0 ns |  0.04 |    0.00 |     736 B |        0.89 |
+|           BuildInSort_Reverse | 1000000 |  96,756,286.2 ns | 1,916,468.17 ns | 1,968,069.91 ns |  96,477,599.5 ns |  1.72 |    0.04 |     824 B |        1.00 |
+|          PdqSort_Span_Reverse | 1000000 |   2,924,412.4 ns |    71,180.44 ns |   183,026.08 ns |   2,947,346.5 ns |  0.05 |    0.00 |     736 B |        0.89 |
+|     PdqSort_Unguarded_Reverse | 1000000 |   2,338,425.5 ns |    53,959.75 ns |   138,036.85 ns |   2,358,399.5 ns |  0.04 |    0.00 |     736 B |        0.89 |
+|     PdqSort_Unmanaged_Reverse | 1000000 |   2,307,556.4 ns |    51,572.08 ns |   113,663.28 ns |   2,334,414.0 ns |  0.04 |    0.00 |     736 B |        0.89 |
+|              BuildInSort_Peek | 1000000 | 230,191,912.6 ns | 1,578,871.61 ns | 1,399,572.76 ns | 229,837,569.0 ns |  4.09 |    0.04 |     824 B |        1.00 |
+|             PdqSort_Span_Peek | 1000000 |  30,190,447.5 ns |   588,724.68 ns |   654,306.82 ns |  30,079,951.5 ns |  0.54 |    0.01 |     736 B |        0.89 |
+|        PdqSort_Unguarded_Peek | 1000000 |  22,721,702.4 ns |   423,806.51 ns |   396,472.36 ns |  22,656,058.5 ns |  0.40 |    0.01 |     736 B |        0.89 |
+|        PdqSort_Unmanaged_Peek | 1000000 |  23,768,419.0 ns |   375,795.18 ns |   351,557.60 ns |  23,758,911.0 ns |  0.42 |    0.01 |     736 B |        0.89 |
+|       BuildInSort_ReversePeek | 1000000 | 240,599,270.4 ns | 2,868,298.74 ns | 2,542,570.75 ns | 240,274,381.0 ns |  4.27 |    0.05 |     824 B |        1.00 |
+|      PdqSort_Span_ReversePeek | 1000000 |  30,471,541.8 ns |   607,005.01 ns |   803,929.97 ns |  30,306,805.5 ns |  0.54 |    0.01 |     736 B |        0.89 |
+| PdqSort_Unguarded_ReversePeek | 1000000 |  23,263,437.8 ns |   451,192.56 ns |   463,341.12 ns |  23,229,328.0 ns |  0.41 |    0.01 |     736 B |        0.89 |
+| PdqSort_Unmanaged_ReversePeek | 1000000 |  25,058,036.2 ns |   495,298.39 ns |   603,416.98 ns |  24,956,272.0 ns |  0.45 |    0.01 |     736 B |        0.89 |

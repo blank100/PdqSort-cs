@@ -86,8 +86,6 @@ namespace Gal.Core
 		private static bool PartialInsertionSort<T>(Span<T> span, int begin, int end, Comparison<T> comparison) {
 			var limit = 0;
 			for (var i = begin + 1; i < end; i++) {
-				if (limit > PARTIAL_INSERTION_SORT_LIMIT) return false;
-
 				var current = i;
 				var previous = i - 1;
 
@@ -102,6 +100,7 @@ namespace Gal.Core
 					} while (comparison(t, span[previous]) < 0);
 					span[current] = t;
 					limit += i - current;
+					if (limit > PARTIAL_INSERTION_SORT_LIMIT) return false;
 				}
 			}
 			return true;
@@ -120,24 +119,18 @@ namespace Gal.Core
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private static unsafe void SwapOffsets<T>(Span<T> span, int first, int last, byte* offsetsL, byte* offsetsR, int num, bool useSwaps) {
-			if (useSwaps) {
-				for (var i = 0; i < num; i++) {
-					Swap(ref span[first + offsetsL[i]], ref span[last - offsetsR[i]]);
-				}
-			} else {
-				var l = first + offsetsL[0];
-				var r = last - offsetsR[0];
-				var tmp = span[l];
+		private static unsafe void SwapOffsets<T>(Span<T> span, int first, int last, byte* offsetsL, byte* offsetsR, int num) {
+			var l = first + offsetsL[0];
+			var r = last - offsetsR[0];
+			var tmp = span[l];
+			span[l] = span[r];
+			for (var i = 1; i < num; i++) {
+				l = first + offsetsL[i];
+				span[r] = span[l];
+				r = last - offsetsR[i];
 				span[l] = span[r];
-				for (var i = 1; i < num; i++) {
-					l = first + offsetsL[i];
-					span[r] = span[l];
-					r = last - offsetsR[i];
-					span[l] = span[r];
-				}
-				span[r] = tmp;
 			}
+			span[r] = tmp;
 		}
 
 		[MethodImpl(MethodImplOptions.NoInlining)]
@@ -176,9 +169,10 @@ namespace Gal.Core
 						offsetsL[numL] = i++; numL += comparison(span[it], pivot) >= 0 ? 1 : 0; ++it;
 						offsetsL[numL] = i++; numL += comparison(span[it], pivot) >= 0 ? 1 : 0; ++it;
 					}
-					if (numL == 0) {
-						firstCur += BLOCK_SIZE;
-						return PartitionRightHoare(span, firstCur, lastCur, pivot, comparison);
+					if ((numL & (BLOCK_SIZE - 1)) == 0) {
+						if (numL == 0) firstCur += BLOCK_SIZE;
+						else numL = 0;
+						break;
 					}
 				}
 				if (numR == 0) {
@@ -194,15 +188,15 @@ namespace Gal.Core
 						--it; offsetsR[numR] = ++i; numR += comparison(span[it], pivot) < 0 ? 1 : 0;
 						--it; offsetsR[numR] = ++i; numR += comparison(span[it], pivot) < 0 ? 1 : 0;
 					}
-					if (numR == 0) {
-						lastCur -= BLOCK_SIZE;
-						return PartitionRightHoare(span, firstCur, lastCur, pivot, comparison);
+					if ((numR & (BLOCK_SIZE - 1)) == 0) {
+						if (numR == 0) lastCur -= BLOCK_SIZE;
+						else numR = 0;
+						break;
 					}
 				}
 
-				var bothFull = numL == BLOCK_SIZE && numR == BLOCK_SIZE;
 				var num = Math.Min(numL, numR);
-				SwapOffsets(span, firstCur, lastCur, offsetsL + startL, offsetsR + startR, num, numL == numR);
+				SwapOffsets(span, firstCur, lastCur, offsetsL + startL, offsetsR + startR, num);
 				numL -= num;
 				numR -= num;
 				startL += num;
@@ -210,10 +204,6 @@ namespace Gal.Core
 
 				if (numL == 0) firstCur += BLOCK_SIZE;
 				if (numR == 0) lastCur -= BLOCK_SIZE;
-
-				if (bothFull) {
-					return PartitionRightHoare(span, firstCur, lastCur, pivot, comparison);
-				}
 			}
 
 			if (numL != 0) {
@@ -403,9 +393,10 @@ namespace Gal.Core
 				// Choose pivot as median of 3 or pseudomedian of 9.
 				var mid = size >> 1;
 				if (size > NINTHER_THRESHOLD) {
+					var q = size >> 2;
 					Sort3(ref span[begin], ref span[begin + mid], ref span[end - 1], comparison);
-					Sort3(ref span[begin + 1], ref span[begin + mid - 1], ref span[end - 2], comparison);
-					Sort3(ref span[begin + 2], ref span[begin + mid + 1], ref span[end - 3], comparison);
+					Sort3(ref span[begin + q], ref span[begin + mid - 1], ref span[end - 1 - q], comparison);
+					Sort3(ref span[begin + q - 1], ref span[begin + mid + 1], ref span[end - q], comparison);
 					Sort3(ref span[begin + mid - 1], ref span[begin + mid], ref span[begin + mid + 1], comparison);
 					Swap(ref span[begin], ref span[begin + mid]);
 				} else {

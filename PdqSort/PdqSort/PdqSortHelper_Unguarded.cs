@@ -76,8 +76,6 @@ namespace Gal.Core
 			nint limit = 0;
 			nint maxByteLimit = (nint)(PARTIAL_INSERTION_SORT_LIMIT * Unsafe.SizeOf<T>());
 			for (ref T itor = ref Unsafe.Add(ref begin, 1); Unsafe.IsAddressLessThan(ref itor, ref end); itor = ref Unsafe.Add(ref itor, 1)) {
-				if (limit > maxByteLimit) return false;
-
 				ref T current = ref itor;
 				ref T previous = ref Unsafe.Subtract(ref itor, 1);
 
@@ -92,6 +90,7 @@ namespace Gal.Core
 					} while (comparison(t, previous) < 0);
 					current = t;
 					limit += Unsafe.ByteOffset(ref current, ref itor);
+					if (limit > maxByteLimit) return false;
 				}
 			}
 			return true;
@@ -110,24 +109,18 @@ namespace Gal.Core
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private static unsafe void SwapOffsets<T>(ref T first, ref T last, byte* offsetsL, byte* offsetsR, int num, bool useSwaps) {
-			if (useSwaps) {
-				for (var i = 0; i < num; i++) {
-					Swap(ref Unsafe.Add(ref first, offsetsL[i]), ref Unsafe.Subtract(ref last, offsetsR[i]));
-				}
-			} else {
-				ref T l = ref Unsafe.Add(ref first, offsetsL[0]);
-				ref T r = ref Unsafe.Subtract(ref last, offsetsR[0]);
-				var tmp = l;
+		private static unsafe void SwapOffsets<T>(ref T first, ref T last, byte* offsetsL, byte* offsetsR, int num) {
+			ref T l = ref Unsafe.Add(ref first, offsetsL[0]);
+			ref T r = ref Unsafe.Subtract(ref last, offsetsR[0]);
+			var tmp = l;
+			l = r;
+			for (var i = 1; i < num; i++) {
+				l = ref Unsafe.Add(ref first, offsetsL[i]);
+				r = l;
+				r = ref Unsafe.Subtract(ref last, offsetsR[i]);
 				l = r;
-				for (var i = 1; i < num; i++) {
-					l = ref Unsafe.Add(ref first, offsetsL[i]);
-					r = l;
-					r = ref Unsafe.Subtract(ref last, offsetsR[i]);
-					l = r;
-				}
-				r = tmp;
 			}
+			r = tmp;
 		}
 
 		[MethodImpl(MethodImplOptions.NoInlining)]
@@ -169,9 +162,10 @@ namespace Gal.Core
 						offsetsL[numL] = i++; numL += comparison(it, pivot) >= 0 ? 1 : 0; it = ref Unsafe.Add(ref it, 1);
 						offsetsL[numL] = i++; numL += comparison(it, pivot) >= 0 ? 1 : 0; it = ref Unsafe.Add(ref it, 1);
 					}
-					if (numL == 0) {
-						firstCur = ref Unsafe.Add(ref firstCur, BLOCK_SIZE);
-						return ref PartitionRightHoare(ref firstCur, ref lastCur, pivot, comparison);
+					if ((numL & (BLOCK_SIZE - 1)) == 0) {
+						if (numL == 0) firstCur = ref Unsafe.Add(ref firstCur, BLOCK_SIZE);
+						else numL = 0;
+						break;
 					}
 				}
 				if (numR == 0) {
@@ -187,15 +181,15 @@ namespace Gal.Core
 						it = ref Unsafe.Subtract(ref it, 1); offsetsR[numR] = ++i; numR += comparison(it, pivot) < 0 ? 1 : 0;
 						it = ref Unsafe.Subtract(ref it, 1); offsetsR[numR] = ++i; numR += comparison(it, pivot) < 0 ? 1 : 0;
 					}
-					if (numR == 0) {
-						lastCur = ref Unsafe.Subtract(ref lastCur, BLOCK_SIZE);
-						return ref PartitionRightHoare(ref firstCur, ref lastCur, pivot, comparison);
+					if ((numR & (BLOCK_SIZE - 1)) == 0) {
+						if (numR == 0) lastCur = ref Unsafe.Subtract(ref lastCur, BLOCK_SIZE);
+						else numR = 0;
+						break;
 					}
 				}
 
-				var bothFull = numL == BLOCK_SIZE && numR == BLOCK_SIZE;
 				var num = Math.Min(numL, numR);
-				SwapOffsets(ref firstCur, ref lastCur, offsetsL + startL, offsetsR + startR, num, numL == numR);
+				SwapOffsets(ref firstCur, ref lastCur, offsetsL + startL, offsetsR + startR, num);
 				numL -= num;
 				numR -= num;
 				startL += num;
@@ -203,10 +197,6 @@ namespace Gal.Core
 
 				if (numL == 0) firstCur = ref Unsafe.Add(ref firstCur, BLOCK_SIZE);
 				if (numR == 0) lastCur = ref Unsafe.Subtract(ref lastCur, BLOCK_SIZE);
-
-				if (bothFull) {
-					return ref PartitionRightHoare(ref firstCur, ref lastCur, pivot, comparison);
-				}
 			}
 
 			if (numL != 0) {
@@ -398,9 +388,10 @@ namespace Gal.Core
 				// Choose pivot as median of 3 or pseudomedian of 9.
 				nint mid = size >> 1;
 				if (size > NINTHER_THRESHOLD) {
+					nint q = size >> 2;
 					Sort3(ref begin, ref Unsafe.Add(ref begin, mid), ref Unsafe.Subtract(ref end, 1), comparison);
-					Sort3(ref Unsafe.Add(ref begin, 1), ref Unsafe.Add(ref begin, mid - 1), ref Unsafe.Subtract(ref end, 2), comparison);
-					Sort3(ref Unsafe.Add(ref begin, 2), ref Unsafe.Add(ref begin, mid + 1), ref Unsafe.Subtract(ref end, 3), comparison);
+					Sort3(ref Unsafe.Add(ref begin, q), ref Unsafe.Add(ref begin, mid - 1), ref Unsafe.Subtract(ref end, 1 + q), comparison);
+					Sort3(ref Unsafe.Add(ref begin, q - 1), ref Unsafe.Add(ref begin, mid + 1), ref Unsafe.Subtract(ref end, q), comparison);
 					Sort3(ref Unsafe.Add(ref begin, mid - 1), ref Unsafe.Add(ref begin, mid), ref Unsafe.Add(ref begin, mid + 1), comparison);
 					Swap(ref begin, ref Unsafe.Add(ref begin, mid));
 				} else {
