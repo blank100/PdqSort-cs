@@ -10,6 +10,7 @@ namespace Gal.Core
 	/// <para>注意:计算距离时需要考虑数据计算越界的问题哦,比如 100 - int.MinValue 的结果是一个负数,int值的安全区间是 int.MinValue/2 至 int.MaxValue/2 </para>
 	/// </summary>
 	/// <para>author gouanlin</para>
+	[SkipLocalsInit]
 	public static class FuzzyBinarySearch
 	{
 		/// <summary>
@@ -32,15 +33,10 @@ namespace Gal.Core
 			while (true) {
 				if (maxIndex - minIndex == 1) return minIndex;
 				var index = (int)((uint)(minIndex + maxIndex) >> 1);
-				switch (comparison(value, list[index])) {
-					case 0: return index;
-					case < 0:
-						maxIndex = index;
-						break;
-					default:
-						minIndex = index;
-						break;
-				}
+				var cmp = comparison(value, list[index]);
+				if (cmp == 0) return index;
+				if (cmp < 0) maxIndex = index;
+				else minIndex = index;
 			}
 		}
 
@@ -65,15 +61,10 @@ namespace Gal.Core
 			while (true) {
 				if (maxIndex - minIndex == 1) return minIndex;
 				var index = (int)((uint)(minIndex + maxIndex) >> 1);
-				switch (comparison(value, Unsafe.Add(ref baseRef, index))) {
-					case 0: return index;
-					case < 0:
-						maxIndex = index;
-						break;
-					default:
-						minIndex = index;
-						break;
-				}
+				var cmp = comparison(value, Unsafe.Add(ref baseRef, index));
+				if (cmp == 0) return index;
+				if (cmp < 0) maxIndex = index;
+				else minIndex = index;
 			}
 		}
 	}

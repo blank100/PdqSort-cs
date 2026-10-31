@@ -9,8 +9,11 @@ namespace Gal.Core
 	/// Pdq排序,基于https://gist.github.com/hez2010/6b52929ee1755788c34818972c46aefb的实现
 	/// </summary>
 	/// <para>author gouanlin</para>
+	[SkipLocalsInit]
 	public class PdqSortHelper_Unguarded
 	{
+		[StructLayout(LayoutKind.Explicit, Size = BLOCK_SIZE * 2)]
+		private struct BlockOffsets { }
 		// Partitions below this size are sorted using insertion sort.
 		public const int INSERTION_SORT_THRESHOLD = 24;
 
@@ -25,8 +28,8 @@ namespace Gal.Core
 		public const int BLOCK_SIZE = 64;
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private static nint ElementCount<T>(ref T begin, ref T end)
-			=> (nint)((nuint)Unsafe.ByteOffset(ref begin, ref end) / (nuint)Unsafe.SizeOf<T>());
+		private static long ElementCount<T>(ref T begin, ref T end)
+			=> (long)((ulong)(long)Unsafe.ByteOffset(ref begin, ref end) / (ulong)Unsafe.SizeOf<T>());
 
 		/// <summary>
 		/// 插入排序
@@ -38,13 +41,16 @@ namespace Gal.Core
 
 				// 先进行比较，这样可以避免对已正确定位的元素进行两次移动。
 				var t = current;
-				if (comparison(t, previous) >= 0) continue;
-				do {
-					current = previous;
+				var prev = previous;
+				if (comparison(t, prev) >= 0) continue;
+				while (true) {
+					current = prev;
 					current = ref previous;
 					if (Unsafe.AreSame(ref current, ref begin)) break;
 					previous = ref Unsafe.Subtract(ref previous, 1);
-				} while (comparison(t, previous) < 0);
+					prev = previous;
+					if (comparison(t, prev) >= 0) break;
+				}
 				current = t;
 			}
 		}
@@ -59,12 +65,15 @@ namespace Gal.Core
 
 				// 先进行比较，这样可以避免对已正确定位的元素进行两次移动。
 				var t = current;
-				if (comparison(t, previous) >= 0) continue;
-				do {
-					current = previous;
+				var prev = previous;
+				if (comparison(t, prev) >= 0) continue;
+				while (true) {
+					current = prev;
 					current = ref previous;
 					previous = ref Unsafe.Subtract(ref previous, 1);
-				} while (comparison(t, previous) < 0);
+					prev = previous;
+					if (comparison(t, prev) >= 0) break;
+				}
 				current = t;
 			}
 		}
@@ -73,23 +82,26 @@ namespace Gal.Core
 		/// 尝试在[begin，end）上使用插入排序。如果超过 PARTIAL_INSERTION_SORT_LIMIT 个元素被移动，并中止排序。否则它会成功排序并返回true。 
 		/// </summary>
 		private static bool PartialInsertionSort<T>(ref T begin, ref T end, Comparison<T> comparison) {
-			nint limit = 0;
-			nint maxByteLimit = (nint)(PARTIAL_INSERTION_SORT_LIMIT * Unsafe.SizeOf<T>());
+			long limit = 0;
+			long maxByteLimit = (long)(PARTIAL_INSERTION_SORT_LIMIT * Unsafe.SizeOf<T>());
 			for (ref T itor = ref Unsafe.Add(ref begin, 1); Unsafe.IsAddressLessThan(ref itor, ref end); itor = ref Unsafe.Add(ref itor, 1)) {
 				ref T current = ref itor;
 				ref T previous = ref Unsafe.Subtract(ref itor, 1);
 
 				// 先进行比较，这样可以避免对已正确定位的元素进行两次移动。
 				var t = current;
-				if (comparison(t, previous) < 0) {
-					do {
-						current = previous;
+				var prev = previous;
+				if (comparison(t, prev) < 0) {
+					while (true) {
+						current = prev;
 						current = ref previous;
 						if (Unsafe.AreSame(ref current, ref begin)) break;
 						previous = ref Unsafe.Subtract(ref previous, 1);
-					} while (comparison(t, previous) < 0);
+						prev = previous;
+						if (comparison(t, prev) >= 0) break;
+					}
 					current = t;
-					limit += Unsafe.ByteOffset(ref current, ref itor);
+					limit += (long)Unsafe.ByteOffset(ref current, ref itor);
 					if (limit > maxByteLimit) return false;
 				}
 			}
@@ -98,7 +110,11 @@ namespace Gal.Core
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private static void Sort2<T>(ref T a, ref T b, Comparison<T> comparison) {
-			if (comparison(b, a) < 0) Swap(ref a, ref b);
+			T va = a, vb = b;
+			if (comparison(vb, va) < 0) {
+				a = vb;
+				b = va;
+			}
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -114,7 +130,7 @@ namespace Gal.Core
 			ref T r = ref Unsafe.Subtract(ref last, offsetsR[0]);
 			var tmp = l;
 			l = r;
-			for (var i = 1; i < num; i++) {
+			for (long i = 1; i < num; i++) {
 				l = ref Unsafe.Add(ref first, offsetsL[i]);
 				r = l;
 				r = ref Unsafe.Subtract(ref last, offsetsR[i]);
@@ -140,27 +156,24 @@ namespace Gal.Core
 		[SkipLocalsInit]
 		[MethodImpl(MethodImplOptions.NoInlining)]
 		private static unsafe ref T PartitionRightBranchlessSlow<T>(ref T first, ref T last, T pivot, Comparison<T> comparison) {
-			byte* offsetsL = stackalloc byte[BLOCK_SIZE];
-			byte* offsetsR = stackalloc byte[BLOCK_SIZE];
+			BlockOffsets offsets;
+			byte* offsetsL = (byte*)&offsets;
+			byte* offsetsR = offsetsL + BLOCK_SIZE;
 
 			ref T firstCur = ref first;
 			ref T lastCur = ref last;
 			int numL = 0, numR = 0, startL = 0, startR = 0;
 
-			nint blockThreshold = (nint)(2 * BLOCK_SIZE * Unsafe.SizeOf<T>());
-			while (Unsafe.ByteOffset(ref firstCur, ref lastCur) > blockThreshold) {
+			long blockThreshold = (long)(2 * BLOCK_SIZE * Unsafe.SizeOf<T>());
+			while ((long)Unsafe.ByteOffset(ref firstCur, ref lastCur) > blockThreshold) {
 				if (numL == 0) {
 					startL = 0;
 					ref T it = ref firstCur;
-					for (byte i = 0; i < BLOCK_SIZE;) {
-						offsetsL[numL] = i++; numL += comparison(it, pivot) >= 0 ? 1 : 0; it = ref Unsafe.Add(ref it, 1);
-						offsetsL[numL] = i++; numL += comparison(it, pivot) >= 0 ? 1 : 0; it = ref Unsafe.Add(ref it, 1);
-						offsetsL[numL] = i++; numL += comparison(it, pivot) >= 0 ? 1 : 0; it = ref Unsafe.Add(ref it, 1);
-						offsetsL[numL] = i++; numL += comparison(it, pivot) >= 0 ? 1 : 0; it = ref Unsafe.Add(ref it, 1);
-						offsetsL[numL] = i++; numL += comparison(it, pivot) >= 0 ? 1 : 0; it = ref Unsafe.Add(ref it, 1);
-						offsetsL[numL] = i++; numL += comparison(it, pivot) >= 0 ? 1 : 0; it = ref Unsafe.Add(ref it, 1);
-						offsetsL[numL] = i++; numL += comparison(it, pivot) >= 0 ? 1 : 0; it = ref Unsafe.Add(ref it, 1);
-						offsetsL[numL] = i++; numL += comparison(it, pivot) >= 0 ? 1 : 0; it = ref Unsafe.Add(ref it, 1);
+					for (int i = 0; i < BLOCK_SIZE;) {
+						offsetsL[numL] = (byte)i; ++i; numL += comparison(it, pivot) >= 0 ? 1 : 0; it = ref Unsafe.Add(ref it, 1);
+						offsetsL[numL] = (byte)i; ++i; numL += comparison(it, pivot) >= 0 ? 1 : 0; it = ref Unsafe.Add(ref it, 1);
+						offsetsL[numL] = (byte)i; ++i; numL += comparison(it, pivot) >= 0 ? 1 : 0; it = ref Unsafe.Add(ref it, 1);
+						offsetsL[numL] = (byte)i; ++i; numL += comparison(it, pivot) >= 0 ? 1 : 0; it = ref Unsafe.Add(ref it, 1);
 					}
 					if ((numL & (BLOCK_SIZE - 1)) == 0) {
 						if (numL == 0) firstCur = ref Unsafe.Add(ref firstCur, BLOCK_SIZE);
@@ -171,15 +184,11 @@ namespace Gal.Core
 				if (numR == 0) {
 					startR = 0;
 					ref T it = ref lastCur;
-					for (byte i = 0; i < BLOCK_SIZE;) {
-						it = ref Unsafe.Subtract(ref it, 1); offsetsR[numR] = ++i; numR += comparison(it, pivot) < 0 ? 1 : 0;
-						it = ref Unsafe.Subtract(ref it, 1); offsetsR[numR] = ++i; numR += comparison(it, pivot) < 0 ? 1 : 0;
-						it = ref Unsafe.Subtract(ref it, 1); offsetsR[numR] = ++i; numR += comparison(it, pivot) < 0 ? 1 : 0;
-						it = ref Unsafe.Subtract(ref it, 1); offsetsR[numR] = ++i; numR += comparison(it, pivot) < 0 ? 1 : 0;
-						it = ref Unsafe.Subtract(ref it, 1); offsetsR[numR] = ++i; numR += comparison(it, pivot) < 0 ? 1 : 0;
-						it = ref Unsafe.Subtract(ref it, 1); offsetsR[numR] = ++i; numR += comparison(it, pivot) < 0 ? 1 : 0;
-						it = ref Unsafe.Subtract(ref it, 1); offsetsR[numR] = ++i; numR += comparison(it, pivot) < 0 ? 1 : 0;
-						it = ref Unsafe.Subtract(ref it, 1); offsetsR[numR] = ++i; numR += comparison(it, pivot) < 0 ? 1 : 0;
+					for (int i = 0; i < BLOCK_SIZE;) {
+						it = ref Unsafe.Subtract(ref it, 1); ++i; offsetsR[numR] = (byte)i; numR += comparison(it, pivot) < 0 ? 1 : 0;
+						it = ref Unsafe.Subtract(ref it, 1); ++i; offsetsR[numR] = (byte)i; numR += comparison(it, pivot) < 0 ? 1 : 0;
+						it = ref Unsafe.Subtract(ref it, 1); ++i; offsetsR[numR] = (byte)i; numR += comparison(it, pivot) < 0 ? 1 : 0;
+						it = ref Unsafe.Subtract(ref it, 1); ++i; offsetsR[numR] = (byte)i; numR += comparison(it, pivot) < 0 ? 1 : 0;
 					}
 					if ((numR & (BLOCK_SIZE - 1)) == 0) {
 						if (numR == 0) lastCur = ref Unsafe.Subtract(ref lastCur, BLOCK_SIZE);
@@ -223,7 +232,7 @@ namespace Gal.Core
 		// partitioning and whether the passed sequence already was correctly partitioned. Assumes the
 		// pivot is a median of at least 3 elements and that [begin, end) is at least
 		// insertion_sort_threshold long.
-		private static ref T PartitionRight<T>(ref T begin, ref T end, Comparison<T> comparison, bool branchless, out bool hasPartitioned) {
+		private static unsafe ref T PartitionRight<T>(ref T begin, ref T end, Comparison<T> comparison, bool branchless, bool* hasPartitioned) {
 			// Move pivot into local for speed.
 			var pivot = begin;
 			ref T first = ref begin;
@@ -248,11 +257,12 @@ namespace Gal.Core
 
 			// If the first pair of elements that should be swapped to partition are the same element,
 			// the passed in sequence already was correctly partitioned.
-			hasPartitioned = !Unsafe.IsAddressLessThan(ref first, ref last);
+			var alreadyPartitioned = !Unsafe.IsAddressLessThan(ref first, ref last);
+			*hasPartitioned = alreadyPartitioned;
 
-			if (!hasPartitioned) {
+			if (!alreadyPartitioned) {
 				Swap(ref first, ref last);
-				if (branchless && Unsafe.ByteOffset(ref first, ref last) > (nint)(2 * BLOCK_SIZE * Unsafe.SizeOf<T>())) {
+				if (branchless && (long)Unsafe.ByteOffset(ref first, ref last) > (long)(2 * BLOCK_SIZE * Unsafe.SizeOf<T>())) {
 					first = ref Unsafe.Add(ref first, 1);
 					first = ref PartitionRightBranchlessSlow(ref first, ref last, pivot, comparison);
 				} else {
@@ -309,34 +319,38 @@ namespace Gal.Core
 			return ref last;
 		}
 
-		private static void HeapSort<T>(ref T begin, nint n, Comparison<T> comparison) {
-			for (nint i = (n >> 1) - 1; i >= 0; i--) Heapify(ref begin, i, n, comparison);
-			for (nint i = n - 1; i > 0; i--) {
-				Swap(ref begin, ref Unsafe.Add(ref begin, i));
+		private static void HeapSort<T>(ref T begin, long n, Comparison<T> comparison) {
+			for (long i = (n >> 1) - 1; i >= 0; i--) Heapify(ref begin, i, n, comparison);
+			for (long i = n - 1; i > 0; i--) {
+				Swap(ref begin, ref Unsafe.Add(ref begin, (IntPtr)i));
 				Heapify(ref begin, 0, i, comparison);
 			}
 		}
 
-		private static void Heapify<T>(ref T begin, nint i, nint n, Comparison<T> comparison) {
+		private static void Heapify<T>(ref T begin, long i, long n, Comparison<T> comparison) {
 			//当前值
-			var current = Unsafe.Add(ref begin, i);
-			nint half = n >> 1;
+			var current = Unsafe.Add(ref begin, (IntPtr)i);
+			long half = n >> 1;
 			while (i < half) {
 				//右子节点索引
-				nint t = (i << 1) + 1;
-				var child = Unsafe.Add(ref begin, t);
+				long t = (i << 1) + 1;
+				var child = Unsafe.Add(ref begin, (IntPtr)t);
+				long right = t + 1;
 
 				//如果有右子节点,且左子节点小于右子节点,则i置为右子节点的索引
-				if (++t < n && comparison(child, Unsafe.Add(ref begin, t)) < 0)
-					child = Unsafe.Add(ref begin, t);
-				else
-					t--;
+				if (right < n) {
+					var rightChild = Unsafe.Add(ref begin, (IntPtr)right);
+					if (comparison(child, rightChild) < 0) {
+						child = rightChild;
+						t = right;
+					}
+				}
 
 				//如果当前节点不小于子节点,结束循环
 				if (comparison(current, child) >= 0) break;
 
 				//将子节点移动到父节点位置
-				Unsafe.Add(ref begin, i) = child;
+				Unsafe.Add(ref begin, (IntPtr)i) = child;
 
 				//父节点的值在current中,用于后续比较,无需处理
 
@@ -345,38 +359,39 @@ namespace Gal.Core
 			}
 
 			//将当前值存回当前节点
-			Unsafe.Add(ref begin, i) = current;
+			Unsafe.Add(ref begin, (IntPtr)i) = current;
 		}
 
 		[MethodImpl(MethodImplOptions.NoInlining)]
-		private static void BreakPatterns<T>(ref T begin, ref T pivot, ref T end, nint leftSize, nint rightSize) {
+		private static void BreakPatterns<T>(ref T begin, ref T pivot, ref T end, long leftSize, long rightSize) {
 			if (leftSize >= INSERTION_SORT_THRESHOLD) {
-				nint q = leftSize >> 2;
-				Swap(ref begin, ref Unsafe.Add(ref begin, q));
-				Swap(ref Unsafe.Subtract(ref pivot, 1), ref Unsafe.Subtract(ref pivot, q));
+				long q = leftSize >> 2;
+				Swap(ref begin, ref Unsafe.Add(ref begin, (IntPtr)q));
+				Swap(ref Unsafe.Subtract(ref pivot, 1), ref Unsafe.Subtract(ref pivot, (IntPtr)q));
 				if (leftSize > NINTHER_THRESHOLD) {
-					Swap(ref Unsafe.Add(ref begin, 1), ref Unsafe.Add(ref begin, q + 1));
-					Swap(ref Unsafe.Add(ref begin, 2), ref Unsafe.Add(ref begin, q + 2));
-					Swap(ref Unsafe.Subtract(ref pivot, 2), ref Unsafe.Subtract(ref pivot, q + 1));
-					Swap(ref Unsafe.Subtract(ref pivot, 3), ref Unsafe.Subtract(ref pivot, q + 2));
+					Swap(ref Unsafe.Add(ref begin, 1), ref Unsafe.Add(ref begin, (IntPtr)(q + 1)));
+					Swap(ref Unsafe.Add(ref begin, 2), ref Unsafe.Add(ref begin, (IntPtr)(q + 2)));
+					Swap(ref Unsafe.Subtract(ref pivot, 2), ref Unsafe.Subtract(ref pivot, (IntPtr)(q + 1)));
+					Swap(ref Unsafe.Subtract(ref pivot, 3), ref Unsafe.Subtract(ref pivot, (IntPtr)(q + 2)));
 				}
 			}
 			if (rightSize >= INSERTION_SORT_THRESHOLD) {
-				nint q = rightSize >> 2;
-				Swap(ref Unsafe.Add(ref pivot, 1), ref Unsafe.Add(ref pivot, 1 + q));
-				Swap(ref Unsafe.Subtract(ref end, 1), ref Unsafe.Subtract(ref end, q));
+				long q = rightSize >> 2;
+				Swap(ref Unsafe.Add(ref pivot, 1), ref Unsafe.Add(ref pivot, (IntPtr)(1 + q)));
+				Swap(ref Unsafe.Subtract(ref end, 1), ref Unsafe.Subtract(ref end, (IntPtr)q));
 				if (rightSize > NINTHER_THRESHOLD) {
-					Swap(ref Unsafe.Add(ref pivot, 2), ref Unsafe.Add(ref pivot, 2 + q));
-					Swap(ref Unsafe.Add(ref pivot, 3), ref Unsafe.Add(ref pivot, 3 + q));
-					Swap(ref Unsafe.Subtract(ref end, 2), ref Unsafe.Subtract(ref end, 1 + q));
-					Swap(ref Unsafe.Subtract(ref end, 3), ref Unsafe.Subtract(ref end, 2 + q));
+					Swap(ref Unsafe.Add(ref pivot, 2), ref Unsafe.Add(ref pivot, (IntPtr)(2 + q)));
+					Swap(ref Unsafe.Add(ref pivot, 3), ref Unsafe.Add(ref pivot, (IntPtr)(3 + q)));
+					Swap(ref Unsafe.Subtract(ref end, 2), ref Unsafe.Subtract(ref end, (IntPtr)(1 + q)));
+					Swap(ref Unsafe.Subtract(ref end, 3), ref Unsafe.Subtract(ref end, (IntPtr)(2 + q)));
 				}
 			}
 		}
 
-		private static void Sort<T>(ref T begin, ref T end, Comparison<T> comparison, int badAllowed, bool leftmost = true, bool branchless = true) {
+		[MethodImpl(MethodImplOptions.NoInlining)]
+		private static unsafe void Sort<T>(ref T begin, ref T end, Comparison<T> comparison, int badAllowed, bool leftmost = true, bool branchless = true) {
 			while (true) {
-				nint size = ElementCount(ref begin, ref end);
+				long size = ElementCount(ref begin, ref end);
 
 				// 对小数组排序,插入排序是最快的
 				if (size < INSERTION_SORT_THRESHOLD) {
@@ -386,16 +401,16 @@ namespace Gal.Core
 				}
 
 				// Choose pivot as median of 3 or pseudomedian of 9.
-				nint mid = size >> 1;
+				long mid = size >> 1;
 				if (size > NINTHER_THRESHOLD) {
-					nint q = size >> 2;
-					Sort3(ref begin, ref Unsafe.Add(ref begin, mid), ref Unsafe.Subtract(ref end, 1), comparison);
-					Sort3(ref Unsafe.Add(ref begin, q), ref Unsafe.Add(ref begin, mid - 1), ref Unsafe.Subtract(ref end, 1 + q), comparison);
-					Sort3(ref Unsafe.Add(ref begin, q - 1), ref Unsafe.Add(ref begin, mid + 1), ref Unsafe.Subtract(ref end, q), comparison);
-					Sort3(ref Unsafe.Add(ref begin, mid - 1), ref Unsafe.Add(ref begin, mid), ref Unsafe.Add(ref begin, mid + 1), comparison);
-					Swap(ref begin, ref Unsafe.Add(ref begin, mid));
+					long q = size >> 2;
+					Sort3(ref begin, ref Unsafe.Add(ref begin, (IntPtr)mid), ref Unsafe.Subtract(ref end, 1), comparison);
+					Sort3(ref Unsafe.Add(ref begin, (IntPtr)q), ref Unsafe.Add(ref begin, (IntPtr)(mid - 1)), ref Unsafe.Subtract(ref end, (IntPtr)(1 + q)), comparison);
+					Sort3(ref Unsafe.Add(ref begin, (IntPtr)(q - 1)), ref Unsafe.Add(ref begin, (IntPtr)(mid + 1)), ref Unsafe.Subtract(ref end, (IntPtr)q), comparison);
+					Sort3(ref Unsafe.Add(ref begin, (IntPtr)(mid - 1)), ref Unsafe.Add(ref begin, (IntPtr)mid), ref Unsafe.Add(ref begin, (IntPtr)(mid + 1)), comparison);
+					Swap(ref begin, ref Unsafe.Add(ref begin, (IntPtr)mid));
 				} else {
-					Sort3(ref Unsafe.Add(ref begin, mid), ref begin, ref Unsafe.Subtract(ref end, 1), comparison);
+					Sort3(ref Unsafe.Add(ref begin, (IntPtr)mid), ref begin, ref Unsafe.Subtract(ref end, 1), comparison);
 				}
 
 				// If *(begin - 1) is the end of the right partition of a previous partition operation
@@ -408,11 +423,12 @@ namespace Gal.Core
 					continue;
 				}
 
-				ref T pivot = ref PartitionRight(ref begin, ref end, comparison, branchless, out bool hasPartitioned);
+				bool hasPartitioned;
+				ref T pivot = ref PartitionRight(ref begin, ref end, comparison, branchless, &hasPartitioned);
 
 				// Check for a highly unbalanced partition.
-				nint leftSize = ElementCount(ref begin, ref pivot);
-				nint rightSize = size - leftSize - 1;
+				long leftSize = ElementCount(ref begin, ref pivot);
+				long rightSize = size - leftSize - 1;
 				var highlyUnbalanced = leftSize < (size >> 3) || rightSize < (size >> 3);
 
 				// If we got a highly unbalanced partition we shuffle elements to break many patterns.

@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Gal.Core
 {
@@ -8,8 +9,11 @@ namespace Gal.Core
 	/// Pdq排序_非托管对象,基于https://gist.github.com/hez2010/6b52929ee1755788c34818972c46aefb的实现
 	/// </summary>
     /// <para>author gouanlin</para>
+	[SkipLocalsInit]
 	public static class PdqSortHelper_Unmanaged
     {
+        [StructLayout(LayoutKind.Explicit, Size = BLOCK_SIZE * 2)]
+        private struct BlockOffsets { }
         /// <summary>
         /// Partitions below this size are sorted using insertion sort.
         /// </summary>
@@ -38,13 +42,16 @@ namespace Gal.Core
 
                 // 先进行比较，这样可以避免对已正确定位的元素进行两次移动。
                 var value = *current;
-                if (comparison(value, *previous) >= 0) continue;
-                do {
-                    *current = *previous;
+                var prev = *previous;
+                if (comparison(value, prev) >= 0) continue;
+                while (true) {
+                    *current = prev;
                     current = previous;
                     if (current == begin) break;
                     --previous;
-                } while (comparison(value, *previous) < 0);
+                    prev = *previous;
+                    if (comparison(value, prev) >= 0) break;
+                }
                 *current = value;
             }
         }
@@ -61,12 +68,15 @@ namespace Gal.Core
 
                 // 先进行比较，这样可以避免对已正确定位的元素进行两次移动。
                 var value = *current;
-                if (comparison(value, *previous) >= 0) continue;
-                do {
-                    *current = *previous;
+                var prev = *previous;
+                if (comparison(value, prev) >= 0) continue;
+                while (true) {
+                    *current = prev;
                     current = previous;
                     --previous;
-                } while (comparison(value, *previous) < 0);
+                    prev = *previous;
+                    if (comparison(value, prev) >= 0) break;
+                }
                 *current = value;
             }
         }
@@ -77,22 +87,26 @@ namespace Gal.Core
         private static unsafe bool PartialInsertionSort<T>(T* begin, T* end, Comparison<T> comparison)
             where T : unmanaged {
             long limit = 0;
+            long maxByteLimit = PARTIAL_INSERTION_SORT_LIMIT * sizeof(T);
             for (var itor = begin + 1; itor < end; ++itor) {
                 var current = itor;
                 var previous = itor - 1;
 
                 // 先进行比较，这样可以避免对已正确定位的元素进行两次移动。
                 var value = *current;
-                if (comparison(value, *previous) < 0) {
-                    do {
-                        *current = *previous;
+                var prev = *previous;
+                if (comparison(value, prev) < 0) {
+                    while (true) {
+                        *current = prev;
                         current = previous;
                         if (current == begin) break;
                         --previous;
-                    } while (comparison(value, *previous) < 0);
+                        prev = *previous;
+                        if (comparison(value, prev) >= 0) break;
+                    }
                     *current = value;
-                    limit += itor - current;
-                    if (limit > PARTIAL_INSERTION_SORT_LIMIT) return false;
+                    limit += (byte*)itor - (byte*)current;
+                    if (limit > maxByteLimit) return false;
                 }
             }
             return true;
@@ -100,7 +114,11 @@ namespace Gal.Core
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static unsafe void Sort2<T>(T* a, T* b, Comparison<T> comparison) where T : unmanaged {
-            if (comparison(*b, *a) < 0) Swap(a, b);
+            T va = *a, vb = *b;
+            if (comparison(vb, va) < 0) {
+                *a = vb;
+                *b = va;
+            }
         }
 
         /// <summary>
@@ -114,13 +132,17 @@ namespace Gal.Core
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static unsafe int ElementCount<T>(T* begin, T* end) where T : unmanaged
+            => (int)((ulong)((byte*)end - (byte*)begin) / (ulong)sizeof(T));
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static unsafe void SwapOffsets<T>(T* first, T* last, byte* offsetsL, byte* offsetsR, int num)
             where T : unmanaged {
             var l = first + offsetsL[0];
             var r = last - offsetsR[0];
             var tmp = *l;
             *l = *r;
-            for (var i = 1; i < num; i++) {
+            for (long i = 1; i < num; i++) {
                 l = first + offsetsL[i];
                 *r = *l;
                 r = last - offsetsR[i];
@@ -146,26 +168,24 @@ namespace Gal.Core
         [MethodImpl(MethodImplOptions.NoInlining)]
         private static unsafe T* PartitionRightBranchlessSlow<T>(T* first, T* last, T pivot, Comparison<T> comparison)
             where T : unmanaged {
-            byte* offsetsL = stackalloc byte[BLOCK_SIZE];
-            byte* offsetsR = stackalloc byte[BLOCK_SIZE];
+            BlockOffsets offsets;
+            byte* offsetsL = (byte*)&offsets;
+            byte* offsetsR = offsetsL + BLOCK_SIZE;
 
             T* firstCur = first;
             T* lastCur = last;
             int numL = 0, numR = 0, startL = 0, startR = 0;
 
-            while (lastCur - firstCur > 2 * BLOCK_SIZE) {
+            long blockThreshold = 2 * BLOCK_SIZE * sizeof(T);
+            while ((byte*)lastCur - (byte*)firstCur > blockThreshold) {
                 if (numL == 0) {
                     startL = 0;
                     var it = firstCur;
-                    for (byte i = 0; i < BLOCK_SIZE;) {
-                        offsetsL[numL] = i++; numL += comparison(*it, pivot) >= 0 ? 1 : 0; ++it;
-                        offsetsL[numL] = i++; numL += comparison(*it, pivot) >= 0 ? 1 : 0; ++it;
-                        offsetsL[numL] = i++; numL += comparison(*it, pivot) >= 0 ? 1 : 0; ++it;
-                        offsetsL[numL] = i++; numL += comparison(*it, pivot) >= 0 ? 1 : 0; ++it;
-                        offsetsL[numL] = i++; numL += comparison(*it, pivot) >= 0 ? 1 : 0; ++it;
-                        offsetsL[numL] = i++; numL += comparison(*it, pivot) >= 0 ? 1 : 0; ++it;
-                        offsetsL[numL] = i++; numL += comparison(*it, pivot) >= 0 ? 1 : 0; ++it;
-                        offsetsL[numL] = i++; numL += comparison(*it, pivot) >= 0 ? 1 : 0; ++it;
+                    for (int i = 0; i < BLOCK_SIZE;) {
+                        offsetsL[numL] = (byte)i; ++i; numL += comparison(*it, pivot) >= 0 ? 1 : 0; ++it;
+                        offsetsL[numL] = (byte)i; ++i; numL += comparison(*it, pivot) >= 0 ? 1 : 0; ++it;
+                        offsetsL[numL] = (byte)i; ++i; numL += comparison(*it, pivot) >= 0 ? 1 : 0; ++it;
+                        offsetsL[numL] = (byte)i; ++i; numL += comparison(*it, pivot) >= 0 ? 1 : 0; ++it;
                     }
                     if ((numL & (BLOCK_SIZE - 1)) == 0) {
                         if (numL == 0) firstCur += BLOCK_SIZE;
@@ -176,15 +196,11 @@ namespace Gal.Core
                 if (numR == 0) {
                     startR = 0;
                     var it = lastCur;
-                    for (byte i = 0; i < BLOCK_SIZE;) {
-                        --it; offsetsR[numR] = ++i; numR += comparison(*it, pivot) < 0 ? 1 : 0;
-                        --it; offsetsR[numR] = ++i; numR += comparison(*it, pivot) < 0 ? 1 : 0;
-                        --it; offsetsR[numR] = ++i; numR += comparison(*it, pivot) < 0 ? 1 : 0;
-                        --it; offsetsR[numR] = ++i; numR += comparison(*it, pivot) < 0 ? 1 : 0;
-                        --it; offsetsR[numR] = ++i; numR += comparison(*it, pivot) < 0 ? 1 : 0;
-                        --it; offsetsR[numR] = ++i; numR += comparison(*it, pivot) < 0 ? 1 : 0;
-                        --it; offsetsR[numR] = ++i; numR += comparison(*it, pivot) < 0 ? 1 : 0;
-                        --it; offsetsR[numR] = ++i; numR += comparison(*it, pivot) < 0 ? 1 : 0;
+                    for (int i = 0; i < BLOCK_SIZE;) {
+                        --it; ++i; offsetsR[numR] = (byte)i; numR += comparison(*it, pivot) < 0 ? 1 : 0;
+                        --it; ++i; offsetsR[numR] = (byte)i; numR += comparison(*it, pivot) < 0 ? 1 : 0;
+                        --it; ++i; offsetsR[numR] = (byte)i; numR += comparison(*it, pivot) < 0 ? 1 : 0;
+                        --it; ++i; offsetsR[numR] = (byte)i; numR += comparison(*it, pivot) < 0 ? 1 : 0;
                     }
                     if ((numR & (BLOCK_SIZE - 1)) == 0) {
                         if (numR == 0) lastCur -= BLOCK_SIZE;
@@ -253,7 +269,7 @@ namespace Gal.Core
 
             if (!alreadyPartitioned) {
                 Swap(first, last);
-                if (branchless && last - first > 2 * BLOCK_SIZE) {
+                if (branchless && (byte*)last - (byte*)first > 2 * BLOCK_SIZE * sizeof(T)) {
                     ++first;
                     first = PartitionRightBranchlessSlow(first, last, pivot, comparison);
                 } else {
@@ -325,12 +341,16 @@ namespace Gal.Core
                 //右子节点索引
                 var t = (i << 1) + 1;
                 var child = begin[t];
+                var right = t + 1;
 
                 //如果有右子节点,且左子节点小于右子节点,则i置为右子节点的索引
-                if (++t < n && comparison(child, begin[t]) < 0)
-                    child = begin[t];
-                else
-                    t--;
+                if (right < n) {
+                    var rightChild = begin[right];
+                    if (comparison(child, rightChild) < 0) {
+                        child = rightChild;
+                        t = right;
+                    }
+                }
 
                 //如果当前节点不小于子节点,结束循环
                 if (comparison(current, child) >= 0) break;
@@ -375,11 +395,12 @@ namespace Gal.Core
             }
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static unsafe void PdqSort<T>(T* begin, T* end, Comparison<T> comparison, int badAllowed,
                                               bool leftmost = true, bool branchless = true) where T : unmanaged {
             // Use a while loop for tail recursion elimination.
             while (true) {
-                var size = (int)(end - begin);
+                var size = ElementCount(begin, end);
 
                 // 对小数组排序,插入排序是最快的
                 if (size < INSERTION_SORT_THRESHOLD) {
@@ -416,7 +437,7 @@ namespace Gal.Core
                 var pivotPos = PartitionRight(begin, end, comparison, branchless, out var alreadyPartitioned);
 
                 // Check for a highly unbalanced partition.
-                var lSize = (int)(pivotPos - begin);
+                var lSize = ElementCount(begin, pivotPos);
                 var rSize = size - lSize - 1;
                 var highlyUnbalanced = lSize < (size >> 3) || rSize < (size >> 3);
 

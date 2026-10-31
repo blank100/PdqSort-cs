@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Gal.Core
 {
@@ -8,8 +9,11 @@ namespace Gal.Core
 	/// Pdq排序,基于https://gist.github.com/hez2010/6b52929ee1755788c34818972c46aefb的实现
 	/// </summary>
 	/// <para>author gouanlin</para>
+	[SkipLocalsInit]
 	public class PdqSortHelper
 	{
+		[StructLayout(LayoutKind.Explicit, Size = BLOCK_SIZE * 2)]
+		private struct BlockOffsets { }
 		// Partitions below this size are sorted using insertion sort.
 		public const int INSERTION_SORT_THRESHOLD = 24;
 
@@ -38,13 +42,16 @@ namespace Gal.Core
 
 				// 先进行比较，这样可以避免对已正确定位的元素进行两次移动。
 				var t = span[current];
-				if (comparison(t, span[previous]) >= 0) continue;
-				do {
-					span[current] = span[previous];
+				var prev = span[previous];
+				if (comparison(t, prev) >= 0) continue;
+				while (true) {
+					span[current] = prev;
 					current = previous;
 					if (current == begin) break;
 					--previous;
-				} while (comparison(t, span[previous]) < 0);
+					prev = span[previous];
+					if (comparison(t, prev) >= 0) break;
+				}
 				span[current] = t;
 			}
 		}
@@ -64,12 +71,15 @@ namespace Gal.Core
 
 				// 先进行比较，这样可以避免对已正确定位的元素进行两次移动。
 				var t = span[current];
-				if (comparison(t, span[previous]) >= 0) continue;
-				do {
-					span[current] = span[previous];
+				var prev = span[previous];
+				if (comparison(t, prev) >= 0) continue;
+				while (true) {
+					span[current] = prev;
 					current = previous;
 					--previous;
-				} while (comparison(t, span[previous]) < 0);
+					prev = span[previous];
+					if (comparison(t, prev) >= 0) break;
+				}
 				span[current] = t;
 			}
 		}
@@ -91,13 +101,16 @@ namespace Gal.Core
 
 				// 先进行比较，这样可以避免对已正确定位的元素进行两次移动。
 				var t = span[current];
-				if (comparison(t, span[previous]) < 0) {
-					do {
-						span[current] = span[previous];
+				var prev = span[previous];
+				if (comparison(t, prev) < 0) {
+					while (true) {
+						span[current] = prev;
 						current = previous;
 						if (current == begin) break;
 						--previous;
-					} while (comparison(t, span[previous]) < 0);
+						prev = span[previous];
+						if (comparison(t, prev) >= 0) break;
+					}
 					span[current] = t;
 					limit += i - current;
 					if (limit > PARTIAL_INSERTION_SORT_LIMIT) return false;
@@ -108,7 +121,11 @@ namespace Gal.Core
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private static void Sort2<T>(ref T a, ref T b, Comparison<T> comparison) {
-			if (comparison(b, a) < 0) Swap(ref a, ref b);
+			T va = a, vb = b;
+			if (comparison(vb, va) < 0) {
+				a = vb;
+				b = va;
+			}
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -120,17 +137,17 @@ namespace Gal.Core
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private static unsafe void SwapOffsets<T>(Span<T> span, int first, int last, byte* offsetsL, byte* offsetsR, int num) {
-			var l = first + offsetsL[0];
-			var r = last - offsetsR[0];
-			var tmp = span[l];
-			span[l] = span[r];
-			for (var i = 1; i < num; i++) {
-				l = first + offsetsL[i];
-				span[r] = span[l];
-				r = last - offsetsR[i];
-				span[l] = span[r];
+			ref T l = ref span[first + offsetsL[0]];
+			ref T r = ref span[last - offsetsR[0]];
+			var tmp = l;
+			l = r;
+			for (long i = 1; i < num; i++) {
+				l = ref span[first + offsetsL[i]];
+				r = l;
+				r = ref span[last - offsetsR[i]];
+				l = r;
 			}
-			span[r] = tmp;
+			r = tmp;
 		}
 
 		[MethodImpl(MethodImplOptions.NoInlining)]
@@ -148,8 +165,9 @@ namespace Gal.Core
 		[SkipLocalsInit]
 		[MethodImpl(MethodImplOptions.NoInlining)]
 		private static unsafe int PartitionRightBranchlessSlow<T>(Span<T> span, int first, int last, T pivot, Comparison<T> comparison) {
-			byte* offsetsL = stackalloc byte[BLOCK_SIZE];
-			byte* offsetsR = stackalloc byte[BLOCK_SIZE];
+			BlockOffsets offsets;
+			byte* offsetsL = (byte*)&offsets;
+			byte* offsetsR = offsetsL + BLOCK_SIZE;
 
 			int firstCur = first;
 			int lastCur = last;
@@ -159,15 +177,11 @@ namespace Gal.Core
 				if (numL == 0) {
 					startL = 0;
 					var it = firstCur;
-					for (byte i = 0; i < BLOCK_SIZE;) {
-						offsetsL[numL] = i++; numL += comparison(span[it], pivot) >= 0 ? 1 : 0; ++it;
-						offsetsL[numL] = i++; numL += comparison(span[it], pivot) >= 0 ? 1 : 0; ++it;
-						offsetsL[numL] = i++; numL += comparison(span[it], pivot) >= 0 ? 1 : 0; ++it;
-						offsetsL[numL] = i++; numL += comparison(span[it], pivot) >= 0 ? 1 : 0; ++it;
-						offsetsL[numL] = i++; numL += comparison(span[it], pivot) >= 0 ? 1 : 0; ++it;
-						offsetsL[numL] = i++; numL += comparison(span[it], pivot) >= 0 ? 1 : 0; ++it;
-						offsetsL[numL] = i++; numL += comparison(span[it], pivot) >= 0 ? 1 : 0; ++it;
-						offsetsL[numL] = i++; numL += comparison(span[it], pivot) >= 0 ? 1 : 0; ++it;
+					for (int i = 0; i < BLOCK_SIZE;) {
+						offsetsL[numL] = (byte)i; ++i; numL += comparison(span[it], pivot) >= 0 ? 1 : 0; ++it;
+						offsetsL[numL] = (byte)i; ++i; numL += comparison(span[it], pivot) >= 0 ? 1 : 0; ++it;
+						offsetsL[numL] = (byte)i; ++i; numL += comparison(span[it], pivot) >= 0 ? 1 : 0; ++it;
+						offsetsL[numL] = (byte)i; ++i; numL += comparison(span[it], pivot) >= 0 ? 1 : 0; ++it;
 					}
 					if ((numL & (BLOCK_SIZE - 1)) == 0) {
 						if (numL == 0) firstCur += BLOCK_SIZE;
@@ -178,15 +192,11 @@ namespace Gal.Core
 				if (numR == 0) {
 					startR = 0;
 					var it = lastCur;
-					for (byte i = 0; i < BLOCK_SIZE;) {
-						--it; offsetsR[numR] = ++i; numR += comparison(span[it], pivot) < 0 ? 1 : 0;
-						--it; offsetsR[numR] = ++i; numR += comparison(span[it], pivot) < 0 ? 1 : 0;
-						--it; offsetsR[numR] = ++i; numR += comparison(span[it], pivot) < 0 ? 1 : 0;
-						--it; offsetsR[numR] = ++i; numR += comparison(span[it], pivot) < 0 ? 1 : 0;
-						--it; offsetsR[numR] = ++i; numR += comparison(span[it], pivot) < 0 ? 1 : 0;
-						--it; offsetsR[numR] = ++i; numR += comparison(span[it], pivot) < 0 ? 1 : 0;
-						--it; offsetsR[numR] = ++i; numR += comparison(span[it], pivot) < 0 ? 1 : 0;
-						--it; offsetsR[numR] = ++i; numR += comparison(span[it], pivot) < 0 ? 1 : 0;
+					for (int i = 0; i < BLOCK_SIZE;) {
+						--it; ++i; offsetsR[numR] = (byte)i; numR += comparison(span[it], pivot) < 0 ? 1 : 0;
+						--it; ++i; offsetsR[numR] = (byte)i; numR += comparison(span[it], pivot) < 0 ? 1 : 0;
+						--it; ++i; offsetsR[numR] = (byte)i; numR += comparison(span[it], pivot) < 0 ? 1 : 0;
+						--it; ++i; offsetsR[numR] = (byte)i; numR += comparison(span[it], pivot) < 0 ? 1 : 0;
 					}
 					if ((numR & (BLOCK_SIZE - 1)) == 0) {
 						if (numR == 0) lastCur -= BLOCK_SIZE;
@@ -330,12 +340,16 @@ namespace Gal.Core
 				//右子节点索引
 				var t = (i << 1) + 1;
 				var child = span[t];
+				var right = t + 1;
 
 				//如果有右子节点,且左子节点小于右子节点,则i置为右子节点的索引
-				if (++t < n && comparison(child, span[t]) < 0)
-					child = span[t];
-				else
-					t--;
+				if (right < n) {
+					var rightChild = span[right];
+					if (comparison(child, rightChild) < 0) {
+						child = rightChild;
+						t = right;
+					}
+				}
 
 				//如果当前节点不小于子节点,结束循环
 				if (comparison(current, child) >= 0) break;
@@ -379,6 +393,7 @@ namespace Gal.Core
 			}
 		}
 
+		[MethodImpl(MethodImplOptions.NoInlining)]
 		private static void Sort<T>(Span<T> span, int begin, int end, Comparison<T> comparison, int badAllowed, bool leftmost = true, bool branchless = true) {
 			while (true) {
 				var size = end - begin;
