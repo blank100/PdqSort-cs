@@ -1,7 +1,7 @@
-﻿using System;
-using System.Collections.Generic;
+using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Gal.Core
 {
@@ -9,8 +9,11 @@ namespace Gal.Core
 	/// Pdq排序,基于https://gist.github.com/hez2010/6b52929ee1755788c34818972c46aefb的实现
 	/// </summary>
 	/// <para>author gouanlin</para>
+	[SkipLocalsInit]
 	public class PdqSortHelper
 	{
+		[StructLayout(LayoutKind.Explicit, Size = BLOCK_SIZE * 2)]
+		private struct BlockOffsets { }
 		// Partitions below this size are sorted using insertion sort.
 		public const int INSERTION_SORT_THRESHOLD = 24;
 
@@ -21,6 +24,9 @@ namespace Gal.Core
 		// amount of element moves before giving up.
 		public const int PARTIAL_INSERTION_SORT_LIMIT = 8;
 
+		// Must be multiple of 8 due to loop unrolling, and < 256 to fit in unsigned char.
+		public const int BLOCK_SIZE = 64;
+
 		/// <summary>
 		/// 插入排序
 		/// </summary>
@@ -30,17 +36,22 @@ namespace Gal.Core
 		/// <param name="comparison"></param>
 		/// <typeparam name="T"></typeparam>
 		private static void InsertionSort<T>(Span<T> span, int begin, int end, Comparison<T> comparison) {
-			if (begin == end) return;
 			for (var i = begin + 1; i < end; i++) {
 				var current = i;
 				var previous = i - 1;
 
 				// 先进行比较，这样可以避免对已正确定位的元素进行两次移动。
 				var t = span[current];
-				if (comparison(t, span[previous]) >= 0) continue;
-				do {
-					span[current--] = span[previous];
-				} while (current != begin && comparison(t, span[--previous]) < 0);
+				var prev = span[previous];
+				if (comparison(t, prev) >= 0) continue;
+				while (true) {
+					span[current] = prev;
+					current = previous;
+					if (current == begin) break;
+					--previous;
+					prev = span[previous];
+					if (comparison(t, prev) >= 0) break;
+				}
 				span[current] = t;
 			}
 		}
@@ -54,17 +65,21 @@ namespace Gal.Core
 		/// <param name="comparison"></param>
 		/// <typeparam name="T"></typeparam>
 		private static void UnguardedInsertionSort<T>(Span<T> span, int begin, int end, Comparison<T> comparison) {
-			if (begin == end) return;
 			for (var i = begin + 1; i < end; i++) {
 				var current = i;
 				var previous = i - 1;
 
 				// 先进行比较，这样可以避免对已正确定位的元素进行两次移动。
 				var t = span[current];
-				if (comparison(t, span[previous]) >= 0) continue;
-				do {
-					span[current--] = span[previous];
-				} while (comparison(t, span[--previous]) < 0);
+				var prev = span[previous];
+				if (comparison(t, prev) >= 0) continue;
+				while (true) {
+					span[current] = prev;
+					current = previous;
+					--previous;
+					prev = span[previous];
+					if (comparison(t, prev) >= 0) break;
+				}
 				span[current] = t;
 			}
 		}
@@ -79,7 +94,6 @@ namespace Gal.Core
 		/// <typeparam name="T"></typeparam>
 		/// <returns></returns>
 		private static bool PartialInsertionSort<T>(Span<T> span, int begin, int end, Comparison<T> comparison) {
-			if (begin == end) return true;
 			var limit = 0;
 			for (var i = begin + 1; i < end; i++) {
 				var current = i;
@@ -87,21 +101,31 @@ namespace Gal.Core
 
 				// 先进行比较，这样可以避免对已正确定位的元素进行两次移动。
 				var t = span[current];
-				if (comparison(t, span[previous]) < 0) {
-					do {
-						span[current--] = span[previous];
-					} while (current != begin && comparison(t, span[--previous]) < 0);
+				var prev = span[previous];
+				if (comparison(t, prev) < 0) {
+					while (true) {
+						span[current] = prev;
+						current = previous;
+						if (current == begin) break;
+						--previous;
+						prev = span[previous];
+						if (comparison(t, prev) >= 0) break;
+					}
 					span[current] = t;
 					limit += i - current;
+					if (limit > PARTIAL_INSERTION_SORT_LIMIT) return false;
 				}
-				if (limit > PARTIAL_INSERTION_SORT_LIMIT) return false;
 			}
 			return true;
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private static void Sort2<T>(ref T a, ref T b, Comparison<T> comparison) {
-			if (comparison(b, a) < 0) Swap(ref a, ref b);
+			T va = a, vb = b;
+			if (comparison(vb, va) < 0) {
+				a = vb;
+				b = va;
+			}
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -111,12 +135,112 @@ namespace Gal.Core
 			Sort2(ref a, ref b, comparison);
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private static unsafe void SwapOffsets<T>(Span<T> span, int first, int last, byte* offsetsL, byte* offsetsR, int num) {
+			ref T l = ref span[first + offsetsL[0]];
+			ref T r = ref span[last - offsetsR[0]];
+			var tmp = l;
+			l = r;
+			for (long i = 1; i < num; i++) {
+				l = ref span[first + offsetsL[i]];
+				r = l;
+				r = ref span[last - offsetsR[i]];
+				l = r;
+			}
+			r = tmp;
+		}
+
+		[MethodImpl(MethodImplOptions.NoInlining)]
+		private static int PartitionRightHoare<T>(Span<T> span, int first, int last, T pivot, Comparison<T> comparison) {
+			--first;
+			while (true) {
+				do { ++first; } while (comparison(span[first], pivot) < 0);
+				do { --last; } while (comparison(span[last], pivot) >= 0);
+				if (first >= last) break;
+				Swap(ref span[first], ref span[last]);
+			}
+			return first;
+		}
+
+		[SkipLocalsInit]
+		[MethodImpl(MethodImplOptions.NoInlining)]
+		private static unsafe int PartitionRightBranchlessSlow<T>(Span<T> span, int first, int last, T pivot, Comparison<T> comparison) {
+			BlockOffsets offsets;
+			byte* offsetsL = (byte*)&offsets;
+			byte* offsetsR = offsetsL + BLOCK_SIZE;
+
+			int firstCur = first;
+			int lastCur = last;
+			int numL = 0, numR = 0, startL = 0, startR = 0;
+
+			while (lastCur - firstCur > 2 * BLOCK_SIZE) {
+				if (numL == 0) {
+					startL = 0;
+					var it = firstCur;
+					for (int i = 0; i < BLOCK_SIZE;) {
+						offsetsL[numL] = (byte)i; ++i; numL += comparison(span[it], pivot) >= 0 ? 1 : 0; ++it;
+						offsetsL[numL] = (byte)i; ++i; numL += comparison(span[it], pivot) >= 0 ? 1 : 0; ++it;
+						offsetsL[numL] = (byte)i; ++i; numL += comparison(span[it], pivot) >= 0 ? 1 : 0; ++it;
+						offsetsL[numL] = (byte)i; ++i; numL += comparison(span[it], pivot) >= 0 ? 1 : 0; ++it;
+					}
+					if ((numL & (BLOCK_SIZE - 1)) == 0) {
+						if (numL == 0) firstCur += BLOCK_SIZE;
+						else numL = 0;
+						break;
+					}
+				}
+				if (numR == 0) {
+					startR = 0;
+					var it = lastCur;
+					for (int i = 0; i < BLOCK_SIZE;) {
+						--it; ++i; offsetsR[numR] = (byte)i; numR += comparison(span[it], pivot) < 0 ? 1 : 0;
+						--it; ++i; offsetsR[numR] = (byte)i; numR += comparison(span[it], pivot) < 0 ? 1 : 0;
+						--it; ++i; offsetsR[numR] = (byte)i; numR += comparison(span[it], pivot) < 0 ? 1 : 0;
+						--it; ++i; offsetsR[numR] = (byte)i; numR += comparison(span[it], pivot) < 0 ? 1 : 0;
+					}
+					if ((numR & (BLOCK_SIZE - 1)) == 0) {
+						if (numR == 0) lastCur -= BLOCK_SIZE;
+						else numR = 0;
+						break;
+					}
+				}
+
+				var num = Math.Min(numL, numR);
+				SwapOffsets(span, firstCur, lastCur, offsetsL + startL, offsetsR + startR, num);
+				numL -= num;
+				numR -= num;
+				startL += num;
+				startR += num;
+
+				if (numL == 0) firstCur += BLOCK_SIZE;
+				if (numR == 0) lastCur -= BLOCK_SIZE;
+			}
+
+			if (numL != 0) {
+				var leftBlockEnd = firstCur + BLOCK_SIZE;
+				while (numL > 0) {
+					--leftBlockEnd;
+					Swap(ref span[firstCur + offsetsL[startL + --numL]], ref span[leftBlockEnd]);
+				}
+				firstCur = leftBlockEnd;
+			} else if (numR != 0) {
+				var rightBlockBegin = lastCur - BLOCK_SIZE;
+				while (numR > 0) {
+					Swap(ref span[lastCur - offsetsR[startR + --numR]], ref span[rightBlockBegin]);
+					++rightBlockBegin;
+				}
+				lastCur = rightBlockBegin;
+			}
+
+			return PartitionRightHoare(span, firstCur, lastCur, pivot, comparison);
+		}
+
 		// Partitions [begin, end) around pivot *begin using comparison function comp. Elements equal
 		// to the pivot are put in the right-hand partition. Returns the position of the pivot after
 		// partitioning and whether the passed sequence already was correctly partitioned. Assumes the
 		// pivot is a median of at least 3 elements and that [begin, end) is at least
 		// insertion_sort_threshold long.
-		private static (int Pivot, bool HasPartitioned) PartitionRight<T>(Span<T> span, int begin, int end, Comparison<T> comparison) {
+		private static int PartitionRight<T>(Span<T> span, int begin, int end, Comparison<T> comparison, bool branchless, out bool hasPartitioned) {
 			// Move pivot into local for speed.
 			var pivot = span[begin];
 			var first = begin;
@@ -124,33 +248,47 @@ namespace Gal.Core
 
 			// Find the first element greater than or equal than the pivot (the median of 3 guarantees
 			// this exists).
-			while (comparison(span[++first], pivot) < 0) { }
+			do { ++first; }
+			while (comparison(span[first], pivot) < 0);
 
 			// Find the first element strictly smaller than the pivot. We have to guard this search if
 			// there was no element before *first.
-			if (first - 1 == 0)
-				while (first < last && comparison(span[--last], pivot) >= 0) { }
-			else
-				while (comparison(span[--last], pivot) >= 0) { }
+			if (first - 1 == begin) {
+				while (first < last) {
+					--last;
+					if (comparison(span[last], pivot) < 0) break;
+				}
+			} else {
+				do { --last; }
+				while (comparison(span[last], pivot) >= 0);
+			}
 
 			// If the first pair of elements that should be swapped to partition are the same element,
 			// the passed in sequence already was correctly partitioned.
-			var hasPartitioned = first >= last;
+			hasPartitioned = first >= last;
 
-			// Keep swapping pairs of elements that are on the wrong side of the pivot. Previously
-			// swapped pairs guard the searches, which is why the first iteration is special-cased
-			// above.
-			while (first < last) {
+			if (!hasPartitioned) {
 				Swap(ref span[first], ref span[last]);
-				while (comparison(span[++first], pivot) < 0) { }
-				while (comparison(span[--last], pivot) >= 0) { }
+				if (branchless && last - first > 2 * BLOCK_SIZE) {
+					++first;
+					first = PartitionRightBranchlessSlow(span, first, last, pivot, comparison);
+				} else {
+					while (true) {
+						do { ++first; }
+						while (comparison(span[first], pivot) < 0);
+						do { --last; }
+						while (comparison(span[last], pivot) >= 0);
+						if (first >= last) break;
+						Swap(ref span[first], ref span[last]);
+					}
+				}
 			}
 
 			// Put the pivot in the right place.
 			var pivotPosition = first - 1;
 			span[begin] = span[pivotPosition];
 			span[pivotPosition] = pivot;
-			return (pivotPosition, hasPartitioned);
+			return pivotPosition;
 		}
 
 		// Similar function to the one above, except elements equal to the pivot are put to the left of
@@ -161,15 +299,23 @@ namespace Gal.Core
 			var pivot = span[begin];
 			var first = begin;
 			var last = end;
-			while (comparison(pivot, span[--last]) < 0) { }
-			if (last + 1 == end)
-				while (first < last && comparison(pivot, span[++first]) >= 0) { }
-			else
-				while (comparison(pivot, span[++first]) >= 0) { }
+			do { --last; }
+			while (comparison(pivot, span[last]) < 0);
+			if (last + 1 == end) {
+				while (first < last) {
+					++first;
+					if (comparison(pivot, span[first]) < 0) break;
+				}
+			} else {
+				do { ++first; }
+				while (comparison(pivot, span[first]) >= 0);
+			}
 			while (first < last) {
 				Swap(ref span[first], ref span[last]);
-				while (comparison(pivot, span[--last]) < 0) { }
-				while (comparison(pivot, span[++first]) >= 0) { }
+				do { --last; }
+				while (comparison(pivot, span[last]) < 0);
+				do { ++first; }
+				while (comparison(pivot, span[first]) >= 0);
 			}
 			var pivotPosition = last;
 			span[begin] = span[pivotPosition];
@@ -178,30 +324,7 @@ namespace Gal.Core
 		}
 
 		private static void HeapSort<T>(Span<T> span, Comparison<T> comparison) {
-			if (span.Length == 0) return;
 			var n = span.Length;
-			for (var i = n >> 1; i >= 1; i--) DownHeap(span, i, n, comparison);
-			for (var i = n; i > 1; i--) {
-				Swap(ref span[0], ref span[i - 1]);
-				DownHeap(span, 1, i - 1, comparison);
-			}
-		}
-
-		private static void DownHeap<T>(Span<T> span, int i, int n, Comparison<T> comparison) {
-			var d = span[i - 1];
-			while (i <= n >> 1) {
-				var child = 2 * i;
-				if (child < n && comparison(span[child - 1], span[child]) < 0) child++;
-				if (comparison(d, span[child - 1]) >= 0) break;
-				span[i - 1] = span[child - 1];
-				i = child;
-			}
-			span[i - 1] = d;
-		}
-
-		private static unsafe void HeapSort1<T>(Span<T> span, Comparison<T> comparison) {
-			var n = span.Length;
-			if (n == 0) return;
 			for (var i = (n >> 1) - 1; i >= 0; i--) Heapify(span, i, n, comparison);
 			for (var i = n - 1; i > 0; i--) {
 				Swap(ref span[0], ref span[i]);
@@ -217,15 +340,19 @@ namespace Gal.Core
 				//右子节点索引
 				var t = (i << 1) + 1;
 				var child = span[t];
+				var right = t + 1;
 
 				//如果有右子节点,且左子节点小于右子节点,则i置为右子节点的索引
-				if (++t < n && comparison(child, span[t]) < 0)
-					child = span[t];
-				else
-					t--;
+				if (right < n) {
+					var rightChild = span[right];
+					if (comparison(child, rightChild) < 0) {
+						child = rightChild;
+						t = right;
+					}
+				}
 
 				//如果当前节点不小于子节点,结束循环
-				if ((comparison(current, child) >= 0)) break;
+				if (comparison(current, child) >= 0) break;
 
 				//将子节点移动到父节点位置
 				span[i] = child;
@@ -240,7 +367,34 @@ namespace Gal.Core
 			span[i] = current;
 		}
 
-		private static void Sort<T>(Span<T> span, int begin, int end, Comparison<T> comparison, int badAllowed, bool leftmost = true) {
+		[MethodImpl(MethodImplOptions.NoInlining)]
+		private static void BreakPatterns<T>(Span<T> span, int begin, int pivot, int end, int leftSize, int rightSize) {
+			if (leftSize >= INSERTION_SORT_THRESHOLD) {
+				var q = leftSize >> 2;
+				Swap(ref span[begin], ref span[begin + q]);
+				Swap(ref span[pivot - 1], ref span[pivot - q]);
+				if (leftSize > NINTHER_THRESHOLD) {
+					Swap(ref span[begin + 1], ref span[begin + q + 1]);
+					Swap(ref span[begin + 2], ref span[begin + q + 2]);
+					Swap(ref span[pivot - 2], ref span[pivot - (q + 1)]);
+					Swap(ref span[pivot - 3], ref span[pivot - (q + 2)]);
+				}
+			}
+			if (rightSize >= INSERTION_SORT_THRESHOLD) {
+				var q = rightSize >> 2;
+				Swap(ref span[pivot + 1], ref span[pivot + 1 + q]);
+				Swap(ref span[end - 1], ref span[end - q]);
+				if (rightSize > NINTHER_THRESHOLD) {
+					Swap(ref span[pivot + 2], ref span[pivot + 2 + q]);
+					Swap(ref span[pivot + 3], ref span[pivot + 3 + q]);
+					Swap(ref span[end - 2], ref span[end - (1 + q)]);
+					Swap(ref span[end - 3], ref span[end - (2 + q)]);
+				}
+			}
+		}
+
+		[MethodImpl(MethodImplOptions.NoInlining)]
+		private static void Sort<T>(Span<T> span, int begin, int end, Comparison<T> comparison, int badAllowed, bool leftmost = true, bool branchless = true) {
 			while (true) {
 				var size = end - begin;
 
@@ -252,11 +406,12 @@ namespace Gal.Core
 				}
 
 				// Choose pivot as median of 3 or pseudomedian of 9.
-				var mid = size / 2;
+				var mid = size >> 1;
 				if (size > NINTHER_THRESHOLD) {
+					var q = size >> 2;
 					Sort3(ref span[begin], ref span[begin + mid], ref span[end - 1], comparison);
-					Sort3(ref span[begin + 1], ref span[begin + mid - 1], ref span[end - 2], comparison);
-					Sort3(ref span[begin + 2], ref span[begin + mid + 1], ref span[end - 3], comparison);
+					Sort3(ref span[begin + q], ref span[begin + mid - 1], ref span[end - 1 - q], comparison);
+					Sort3(ref span[begin + q - 1], ref span[begin + mid + 1], ref span[end - q], comparison);
 					Sort3(ref span[begin + mid - 1], ref span[begin + mid], ref span[begin + mid + 1], comparison);
 					Swap(ref span[begin], ref span[begin + mid]);
 				} else {
@@ -272,40 +427,22 @@ namespace Gal.Core
 					begin = PartitionLeft(span, begin, end, comparison) + 1;
 					continue;
 				}
-				var (pivot, hasPartitioned) = PartitionRight(span, begin, end, comparison);
+				var pivot = PartitionRight(span, begin, end, comparison, branchless, out bool hasPartitioned);
 
 				// Check for a highly unbalanced partition.
 				var leftSize = pivot - begin;
-				var rightSize = end - (pivot + 1);
-				var highlyUnbalanced = leftSize < size / 8 || rightSize < size / 8;
+				var rightSize = size - leftSize - 1;
+				var highlyUnbalanced = leftSize < (size >> 3) || rightSize < (size >> 3);
 
 				// If we got a highly unbalanced partition we shuffle elements to break many patterns.
 				if (highlyUnbalanced) {
+					branchless = false;
 					// If we had too many bad partitions, switch to heapsort to guarantee O(n log n).
 					if (--badAllowed == 0) {
-						HeapSort1(span.Slice(begin, end), comparison);
+						HeapSort(span.Slice(begin, size), comparison);
 						return;
 					}
-					if (leftSize >= INSERTION_SORT_THRESHOLD) {
-						Swap(ref span[begin], ref span[begin + leftSize / 4]);
-						Swap(ref span[pivot - 1], ref span[pivot - leftSize / 4]);
-						if (leftSize > NINTHER_THRESHOLD) {
-							Swap(ref span[begin + 1], ref span[begin + leftSize / 4 + 1]);
-							Swap(ref span[begin + 2], ref span[begin + leftSize / 4 + 2]);
-							Swap(ref span[pivot - 2], ref span[pivot - (leftSize / 4 + 1)]);
-							Swap(ref span[pivot - 3], ref span[pivot - (leftSize / 4 + 2)]);
-						}
-					}
-					if (rightSize >= INSERTION_SORT_THRESHOLD) {
-						Swap(ref span[pivot + 1], ref span[pivot + 1 + rightSize / 4]);
-						Swap(ref span[end - 1], ref span[end - rightSize / 4]);
-						if (rightSize > NINTHER_THRESHOLD) {
-							Swap(ref span[pivot + 2], ref span[pivot + 2 + rightSize / 4]);
-							Swap(ref span[pivot + 3], ref span[pivot + 3 + rightSize / 4]);
-							Swap(ref span[end - 2], ref span[end - (1 + rightSize / 4)]);
-							Swap(ref span[end - 3], ref span[end - (2 + rightSize / 4)]);
-						}
-					}
+					BreakPatterns(span, begin, pivot, end, leftSize, rightSize);
 				} else {
 					// If we were decently balanced and we tried to sort an already partitioned
 					// sequence try to use insertion sort.
@@ -317,7 +454,7 @@ namespace Gal.Core
 
 				// Sort the left partition first using recursion and do tail recursion elimination for
 				// the right-hand partition.
-				Sort(span, begin, pivot, comparison, badAllowed, leftmost);
+				Sort(span, begin, pivot, comparison, badAllowed, leftmost, branchless);
 				begin = pivot + 1;
 				leftmost = false;
 			}

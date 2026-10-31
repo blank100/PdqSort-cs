@@ -1,5 +1,7 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Gal.Core
 {
@@ -8,6 +10,7 @@ namespace Gal.Core
 	/// <para>注意:计算距离时需要考虑数据计算越界的问题哦,比如 100 - int.MinValue 的结果是一个负数,int值的安全区间是 int.MinValue/2 至 int.MaxValue/2 </para>
 	/// </summary>
 	/// <para>author gouanlin</para>
+	[SkipLocalsInit]
 	public static class FuzzyBinarySearch
 	{
 		/// <summary>
@@ -28,17 +31,12 @@ namespace Gal.Core
 			if (comparison(value, list[minIndex]) <= 0) return minIndex;
 			if (comparison(value, list[maxIndex]) >= 0) return maxIndex;
 			while (true) {
-				if (maxIndex - minIndex == 1) return comparison(value, list[maxIndex]) == 0 ? maxIndex : minIndex;
-				var index = (minIndex + maxIndex) >> 1;
-				switch (comparison(value, list[index])) {
-					case 0: return index;
-					case < 0:
-						maxIndex = index;
-						break;
-					default:
-						minIndex = index;
-						break;
-				}
+				if (maxIndex - minIndex == 1) return minIndex;
+				var index = (int)((uint)(minIndex + maxIndex) >> 1);
+				var cmp = comparison(value, list[index]);
+				if (cmp == 0) return index;
+				if (cmp < 0) maxIndex = index;
+				else minIndex = index;
 			}
 		}
 
@@ -55,22 +53,18 @@ namespace Gal.Core
 		/// <param name="comparison">一定要考虑数值越界的问题哦</param>
 		/// <returns>目标在列表中的索引,若目标不在列表中,则返回目标所在区间的前一个索引</returns>
 		public static int Exec<T>(T value, ReadOnlySpan<T> span, Comparison<T> comparison) {
+			ref T baseRef = ref MemoryMarshal.GetReference(span);
 			int minIndex = 0, maxIndex = span.Length - 1;
 
-			if (comparison(value, span[minIndex]) <= 0) return minIndex;
-			if (comparison(value, span[maxIndex]) >= 0) return maxIndex;
+			if (comparison(value, baseRef) <= 0) return minIndex;
+			if (comparison(value, Unsafe.Add(ref baseRef, maxIndex)) >= 0) return maxIndex;
 			while (true) {
-				if (maxIndex - minIndex == 1) return comparison(value, span[maxIndex]) == 0 ? maxIndex : minIndex;
-				var index = (minIndex + maxIndex) >> 1;
-				switch (comparison(value, span[index])) {
-					case 0: return index;
-					case < 0:
-						maxIndex = index;
-						break;
-					default:
-						minIndex = index;
-						break;
-				}
+				if (maxIndex - minIndex == 1) return minIndex;
+				var index = (int)((uint)(minIndex + maxIndex) >> 1);
+				var cmp = comparison(value, Unsafe.Add(ref baseRef, index));
+				if (cmp == 0) return index;
+				if (cmp < 0) maxIndex = index;
+				else minIndex = index;
 			}
 		}
 	}
