@@ -31,10 +31,8 @@ namespace Gal.Core
         /// 插入排序,数组范围为 [begin,end)
         /// </summary>
         private static unsafe void InsertionSort<T>(T* begin, T* end, Comparison<T> comparison) where T : unmanaged {
-            if (begin == end) return;
-
             //从第二个元素开始,依次与前一个元素比较,如果当前值小于比较值,则比较值向后移动一位,直到比较失败,将当前值存入当前位置
-            for (var itor = begin + 1; itor != end; ++itor) {
+            for (var itor = begin + 1; itor < end; ++itor) {
                 var current = itor;
                 var previous = itor - 1;
 
@@ -42,8 +40,11 @@ namespace Gal.Core
                 var value = *current;
                 if (comparison(value, *previous) >= 0) continue;
                 do {
-                    *current-- = *previous;
-                } while (current != begin && comparison(value, *--previous) < 0);
+                    *current = *previous;
+                    current = previous;
+                    if (current == begin) break;
+                    --previous;
+                } while (comparison(value, *previous) < 0);
                 *current = value;
             }
         }
@@ -53,10 +54,8 @@ namespace Gal.Core
         /// </summary>
         private static unsafe void UnguardedInsertionSort<T>(T* begin, T* end, Comparison<T> comparison)
             where T : unmanaged {
-            if (begin == end) return;
-
             //从第二个元素开始,依次与前一个元素比较,如果当前值小于比较值,则比较值向后移动一位,直到比较失败,将当前值存入当前位置
-            for (var itor = begin + 1; itor != end; ++itor) {
+            for (var itor = begin + 1; itor < end; ++itor) {
                 var current = itor;
                 var previous = itor - 1;
 
@@ -64,8 +63,10 @@ namespace Gal.Core
                 var value = *current;
                 if (comparison(value, *previous) >= 0) continue;
                 do {
-                    *current-- = *previous;
-                } while (comparison(value, *--previous) < 0);
+                    *current = *previous;
+                    current = previous;
+                    --previous;
+                } while (comparison(value, *previous) < 0);
                 *current = value;
             }
         }
@@ -76,7 +77,7 @@ namespace Gal.Core
         private static unsafe bool PartialInsertionSort<T>(T* begin, T* end, Comparison<T> comparison)
             where T : unmanaged {
             long limit = 0;
-            for (var itor = begin + 1; itor != end; ++itor) {
+            for (var itor = begin + 1; itor < end; ++itor) {
                 if (limit > PARTIAL_INSERTION_SORT_LIMIT) return false;
 
                 var current = itor;
@@ -86,8 +87,11 @@ namespace Gal.Core
                 var value = *current;
                 if (comparison(value, *previous) < 0) {
                     do {
-                        *current-- = *previous;
-                    } while (current != begin && comparison(value, *--previous) < 0);
+                        *current = *previous;
+                        current = previous;
+                        if (current == begin) break;
+                        --previous;
+                    } while (comparison(value, *previous) < 0);
                     *current = value;
                     limit += itor - current;
                 }
@@ -137,8 +141,8 @@ namespace Gal.Core
             where T : unmanaged {
             --first;
             while (true) {
-                while (comparison(*++first, pivot) < 0) { }
-                while (comparison(*--last, pivot) >= 0) { }
+                do { ++first; } while (comparison(*first, pivot) < 0);
+                do { --last; } while (comparison(*last, pivot) >= 0);
                 if (first >= last) break;
                 Swap(first, last);
             }
@@ -146,6 +150,7 @@ namespace Gal.Core
         }
 
         [SkipLocalsInit]
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static unsafe T* PartitionRightBranchlessSlow<T>(T* first, T* last, T pivot, Comparison<T> comparison)
             where T : unmanaged {
             byte* offsetsL = stackalloc byte[BLOCK_SIZE];
@@ -237,17 +242,20 @@ namespace Gal.Core
 
             // Find the first element greater than or equal than the pivot (the median of 3 guarantees
             // this exists).
-            while (comparison(*++first, pivot) < 0) {
-            }
+            do { ++first; }
+            while (comparison(*first, pivot) < 0);
 
             // Find the first element strictly smaller than the pivot. We have to guard this search if
             // there was no element before *first.
-            if (first - 1 == begin)
-                while (first < last && comparison(*--last, pivot) >= 0) {
+            if (first - 1 == begin) {
+                while (first < last) {
+                    --last;
+                    if (comparison(*last, pivot) < 0) break;
                 }
-            else
-                while (comparison(*--last, pivot) >= 0) {
-                }
+            } else {
+                do { --last; }
+                while (comparison(*last, pivot) >= 0);
+            }
 
             // If the first pair of elements that should be swapped to partition are the same element,
             // the passed in sequence already was correctly partitioned.
@@ -260,10 +268,10 @@ namespace Gal.Core
                     first = PartitionRightBranchlessSlow(first, last, pivot, comparison);
                 } else {
                     while (true) {
-                        while (comparison(*++first, pivot) < 0) {
-                        }
-                        while (comparison(*--last, pivot) >= 0) {
-                        }
+                        do { ++first; }
+                        while (comparison(*first, pivot) < 0);
+                        do { --last; }
+                        while (comparison(*last, pivot) >= 0);
                         if (first >= last) break;
                         Swap(first, last);
                     }
@@ -287,20 +295,23 @@ namespace Gal.Core
             var pivot = *begin;
             var first = begin;
             var last = end;
-            while (comparison(pivot, *--last) < 0) {
+            do { --last; }
+            while (comparison(pivot, *last) < 0);
+            if (last + 1 == end) {
+                while (first < last) {
+                    ++first;
+                    if (comparison(pivot, *first) < 0) break;
+                }
+            } else {
+                do { ++first; }
+                while (comparison(pivot, *first) >= 0);
             }
-            if (last + 1 == end)
-                while (first < last && comparison(pivot, *++first) >= 0) {
-                }
-            else
-                while (comparison(pivot, *++first) >= 0) {
-                }
             while (first < last) {
                 Swap(first, last);
-                while (comparison(pivot, *--last) < 0) {
-                }
-                while (comparison(pivot, *++first) >= 0) {
-                }
+                do { --last; }
+                while (comparison(pivot, *last) < 0);
+                do { ++first; }
+                while (comparison(pivot, *first) >= 0);
             }
             var pivotPos = last;
             *begin = *pivotPos;
@@ -347,6 +358,33 @@ namespace Gal.Core
             begin[i] = current;
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static unsafe void BreakPatterns<T>(T* begin, T* pivotPos, T* end, int lSize, int rSize)
+            where T : unmanaged {
+            if (lSize >= INSERTION_SORT_THRESHOLD) {
+                var q = lSize >> 2;
+                Swap(begin, begin + q);
+                Swap(pivotPos - 1, pivotPos - q);
+                if (lSize > NINTHER_THRESHOLD) {
+                    Swap(begin + 1, begin + (q + 1));
+                    Swap(begin + 2, begin + (q + 2));
+                    Swap(pivotPos - 2, pivotPos - (q + 1));
+                    Swap(pivotPos - 3, pivotPos - (q + 2));
+                }
+            }
+            if (rSize >= INSERTION_SORT_THRESHOLD) {
+                var q = rSize >> 2;
+                Swap(pivotPos + 1, pivotPos + (1 + q));
+                Swap(end - 1, end - q);
+                if (rSize > NINTHER_THRESHOLD) {
+                    Swap(pivotPos + 2, pivotPos + (2 + q));
+                    Swap(pivotPos + 3, pivotPos + (3 + q));
+                    Swap(end - 2, end - (1 + q));
+                    Swap(end - 3, end - (2 + q));
+                }
+            }
+        }
+
         private static unsafe void PdqSort<T>(T* begin, T* end, Comparison<T> comparison, int badAllowed,
                                               bool leftmost = true, bool branchless = true) where T : unmanaged {
             // Use a while loop for tail recursion elimination.
@@ -369,7 +407,7 @@ namespace Gal.Core
                     Sort3(begin + 1, begin + (s2 - 1), end - 2, comparison);
                     Sort3(begin + 2, begin + (s2 + 1), end - 3, comparison);
                     Sort3(begin + (s2 - 1), begin + s2, begin + (s2 + 1), comparison);
-                    (*begin, *(begin + s2)) = (*(begin + s2), *begin);
+                    Swap(begin, begin + s2);
                 } else
                     Sort3(begin + s2, begin, end - 1, comparison);
 
@@ -399,28 +437,7 @@ namespace Gal.Core
                         HeapSort(begin, size, comparison);
                         return;
                     }
-                    if (lSize >= INSERTION_SORT_THRESHOLD) {
-                        var q = lSize >> 2;
-                        Swap(begin, begin + q);
-                        Swap(pivotPos - 1, pivotPos - q);
-                        if (lSize > NINTHER_THRESHOLD) {
-                            Swap(begin + 1, begin + (q + 1));
-                            Swap(begin + 2, begin + (q + 2));
-                            Swap(pivotPos - 2, pivotPos - (q + 1));
-                            Swap(pivotPos - 3, pivotPos - (q + 2));
-                        }
-                    }
-                    if (rSize >= INSERTION_SORT_THRESHOLD) {
-                        var q = rSize >> 2;
-                        Swap(pivotPos + 1, pivotPos + (1 + q));
-                        Swap(end - 1, end - q);
-                        if (rSize > NINTHER_THRESHOLD) {
-                            Swap(pivotPos + 2, pivotPos + (2 + q));
-                            Swap(pivotPos + 3, pivotPos + (3 + q));
-                            Swap(end - 2, end - (1 + q));
-                            Swap(end - 3, end - (2 + q));
-                        }
-                    }
+                    BreakPatterns(begin, pivotPos, end, lSize, rSize);
                 } else {
                     // If we were decently balanced and we tried to sort an already partitioned
                     // sequence try to use insertion sort.

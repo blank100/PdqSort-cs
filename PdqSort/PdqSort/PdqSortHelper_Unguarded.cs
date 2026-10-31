@@ -32,9 +32,7 @@ namespace Gal.Core
 		/// 插入排序
 		/// </summary>
 		private static void InsertionSort<T>(ref T begin, ref T end, Comparison<T> comparison) {
-			if (Unsafe.AreSame(ref begin, ref end)) return;
-
-			for (ref T itor = ref Unsafe.Add(ref begin, 1); !Unsafe.AreSame(ref itor, ref end); itor = ref Unsafe.Add(ref itor, 1)) {
+			for (ref T itor = ref Unsafe.Add(ref begin, 1); Unsafe.IsAddressLessThan(ref itor, ref end); itor = ref Unsafe.Add(ref itor, 1)) {
 				ref T current = ref itor;
 				ref T previous = ref Unsafe.Subtract(ref itor, 1);
 
@@ -55,9 +53,7 @@ namespace Gal.Core
 		/// 不做越界检查的插入排序(假定span[begin-1]的值存在,且小于此分区内的所以元素)
 		/// </summary>
 		private static void UnguardedInsertionSort<T>(ref T begin, ref T end, Comparison<T> comparison) {
-			if (Unsafe.AreSame(ref begin, ref end)) return;
-
-			for (ref T itor = ref Unsafe.Add(ref begin, 1); !Unsafe.AreSame(ref itor, ref end); itor = ref Unsafe.Add(ref itor, 1)) {
+			for (ref T itor = ref Unsafe.Add(ref begin, 1); Unsafe.IsAddressLessThan(ref itor, ref end); itor = ref Unsafe.Add(ref itor, 1)) {
 				ref T current = ref itor;
 				ref T previous = ref Unsafe.Subtract(ref itor, 1);
 
@@ -79,7 +75,7 @@ namespace Gal.Core
 		private static bool PartialInsertionSort<T>(ref T begin, ref T end, Comparison<T> comparison) {
 			nint limit = 0;
 			nint maxByteLimit = (nint)(PARTIAL_INSERTION_SORT_LIMIT * Unsafe.SizeOf<T>());
-			for (ref T itor = ref Unsafe.Add(ref begin, 1); !Unsafe.AreSame(ref itor, ref end); itor = ref Unsafe.Add(ref itor, 1)) {
+			for (ref T itor = ref Unsafe.Add(ref begin, 1); Unsafe.IsAddressLessThan(ref itor, ref end); itor = ref Unsafe.Add(ref itor, 1)) {
 				if (limit > maxByteLimit) return false;
 
 				ref T current = ref itor;
@@ -149,6 +145,7 @@ namespace Gal.Core
 		}
 
 		[SkipLocalsInit]
+		[MethodImpl(MethodImplOptions.NoInlining)]
 		private static unsafe ref T PartitionRightBranchlessSlow<T>(ref T first, ref T last, T pivot, Comparison<T> comparison) {
 			byte* offsetsL = stackalloc byte[BLOCK_SIZE];
 			byte* offsetsR = stackalloc byte[BLOCK_SIZE];
@@ -361,6 +358,32 @@ namespace Gal.Core
 			Unsafe.Add(ref begin, i) = current;
 		}
 
+		[MethodImpl(MethodImplOptions.NoInlining)]
+		private static void BreakPatterns<T>(ref T begin, ref T pivot, ref T end, nint leftSize, nint rightSize) {
+			if (leftSize >= INSERTION_SORT_THRESHOLD) {
+				nint q = leftSize >> 2;
+				Swap(ref begin, ref Unsafe.Add(ref begin, q));
+				Swap(ref Unsafe.Subtract(ref pivot, 1), ref Unsafe.Subtract(ref pivot, q));
+				if (leftSize > NINTHER_THRESHOLD) {
+					Swap(ref Unsafe.Add(ref begin, 1), ref Unsafe.Add(ref begin, q + 1));
+					Swap(ref Unsafe.Add(ref begin, 2), ref Unsafe.Add(ref begin, q + 2));
+					Swap(ref Unsafe.Subtract(ref pivot, 2), ref Unsafe.Subtract(ref pivot, q + 1));
+					Swap(ref Unsafe.Subtract(ref pivot, 3), ref Unsafe.Subtract(ref pivot, q + 2));
+				}
+			}
+			if (rightSize >= INSERTION_SORT_THRESHOLD) {
+				nint q = rightSize >> 2;
+				Swap(ref Unsafe.Add(ref pivot, 1), ref Unsafe.Add(ref pivot, 1 + q));
+				Swap(ref Unsafe.Subtract(ref end, 1), ref Unsafe.Subtract(ref end, q));
+				if (rightSize > NINTHER_THRESHOLD) {
+					Swap(ref Unsafe.Add(ref pivot, 2), ref Unsafe.Add(ref pivot, 2 + q));
+					Swap(ref Unsafe.Add(ref pivot, 3), ref Unsafe.Add(ref pivot, 3 + q));
+					Swap(ref Unsafe.Subtract(ref end, 2), ref Unsafe.Subtract(ref end, 1 + q));
+					Swap(ref Unsafe.Subtract(ref end, 3), ref Unsafe.Subtract(ref end, 2 + q));
+				}
+			}
+		}
+
 		private static void Sort<T>(ref T begin, ref T end, Comparison<T> comparison, int badAllowed, bool leftmost = true, bool branchless = true) {
 			while (true) {
 				nint size = ElementCount(ref begin, ref end);
@@ -409,28 +432,7 @@ namespace Gal.Core
 						HeapSort(ref begin, size, comparison);
 						return;
 					}
-					if (leftSize >= INSERTION_SORT_THRESHOLD) {
-						nint q = leftSize >> 2;
-						Swap(ref begin, ref Unsafe.Add(ref begin, q));
-						Swap(ref Unsafe.Subtract(ref pivot, 1), ref Unsafe.Subtract(ref pivot, q));
-						if (leftSize > NINTHER_THRESHOLD) {
-							Swap(ref Unsafe.Add(ref begin, 1), ref Unsafe.Add(ref begin, q + 1));
-							Swap(ref Unsafe.Add(ref begin, 2), ref Unsafe.Add(ref begin, q + 2));
-							Swap(ref Unsafe.Subtract(ref pivot, 2), ref Unsafe.Subtract(ref pivot, q + 1));
-							Swap(ref Unsafe.Subtract(ref pivot, 3), ref Unsafe.Subtract(ref pivot, q + 2));
-						}
-					}
-					if (rightSize >= INSERTION_SORT_THRESHOLD) {
-						nint q = rightSize >> 2;
-						Swap(ref Unsafe.Add(ref pivot, 1), ref Unsafe.Add(ref pivot, 1 + q));
-						Swap(ref Unsafe.Subtract(ref end, 1), ref Unsafe.Subtract(ref end, q));
-						if (rightSize > NINTHER_THRESHOLD) {
-							Swap(ref Unsafe.Add(ref pivot, 2), ref Unsafe.Add(ref pivot, 2 + q));
-							Swap(ref Unsafe.Add(ref pivot, 3), ref Unsafe.Add(ref pivot, 3 + q));
-							Swap(ref Unsafe.Subtract(ref end, 2), ref Unsafe.Subtract(ref end, 1 + q));
-							Swap(ref Unsafe.Subtract(ref end, 3), ref Unsafe.Subtract(ref end, 2 + q));
-						}
-					}
+					BreakPatterns(ref begin, ref pivot, ref end, leftSize, rightSize);
 				} else {
 					// If we were decently balanced and we tried to sort an already partitioned
 					// sequence try to use insertion sort.
