@@ -1,5 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
+using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 
@@ -79,9 +78,10 @@ namespace Gal.Core
 		/// <typeparam name="T"></typeparam>
 		/// <returns></returns>
 		private static bool PartialInsertionSort<T>(Span<T> span, int begin, int end, Comparison<T> comparison) {
-			if (begin == end) return true;
 			var limit = 0;
 			for (var i = begin + 1; i < end; i++) {
+				if (limit > PARTIAL_INSERTION_SORT_LIMIT) return false;
+
 				var current = i;
 				var previous = i - 1;
 
@@ -94,7 +94,6 @@ namespace Gal.Core
 					span[current] = t;
 					limit += i - current;
 				}
-				if (limit > PARTIAL_INSERTION_SORT_LIMIT) return false;
 			}
 			return true;
 		}
@@ -116,7 +115,7 @@ namespace Gal.Core
 		// partitioning and whether the passed sequence already was correctly partitioned. Assumes the
 		// pivot is a median of at least 3 elements and that [begin, end) is at least
 		// insertion_sort_threshold long.
-		private static (int Pivot, bool HasPartitioned) PartitionRight<T>(Span<T> span, int begin, int end, Comparison<T> comparison) {
+		private static int PartitionRight<T>(Span<T> span, int begin, int end, Comparison<T> comparison, out bool hasPartitioned) {
 			// Move pivot into local for speed.
 			var pivot = span[begin];
 			var first = begin;
@@ -128,14 +127,14 @@ namespace Gal.Core
 
 			// Find the first element strictly smaller than the pivot. We have to guard this search if
 			// there was no element before *first.
-			if (first - 1 == 0)
+			if (first - 1 == begin)
 				while (first < last && comparison(span[--last], pivot) >= 0) { }
 			else
 				while (comparison(span[--last], pivot) >= 0) { }
 
 			// If the first pair of elements that should be swapped to partition are the same element,
 			// the passed in sequence already was correctly partitioned.
-			var hasPartitioned = first >= last;
+			hasPartitioned = first >= last;
 
 			// Keep swapping pairs of elements that are on the wrong side of the pivot. Previously
 			// swapped pairs guard the searches, which is why the first iteration is special-cased
@@ -150,7 +149,7 @@ namespace Gal.Core
 			var pivotPosition = first - 1;
 			span[begin] = span[pivotPosition];
 			span[pivotPosition] = pivot;
-			return (pivotPosition, hasPartitioned);
+			return pivotPosition;
 		}
 
 		// Similar function to the one above, except elements equal to the pivot are put to the left of
@@ -178,30 +177,7 @@ namespace Gal.Core
 		}
 
 		private static void HeapSort<T>(Span<T> span, Comparison<T> comparison) {
-			if (span.Length == 0) return;
 			var n = span.Length;
-			for (var i = n >> 1; i >= 1; i--) DownHeap(span, i, n, comparison);
-			for (var i = n; i > 1; i--) {
-				Swap(ref span[0], ref span[i - 1]);
-				DownHeap(span, 1, i - 1, comparison);
-			}
-		}
-
-		private static void DownHeap<T>(Span<T> span, int i, int n, Comparison<T> comparison) {
-			var d = span[i - 1];
-			while (i <= n >> 1) {
-				var child = 2 * i;
-				if (child < n && comparison(span[child - 1], span[child]) < 0) child++;
-				if (comparison(d, span[child - 1]) >= 0) break;
-				span[i - 1] = span[child - 1];
-				i = child;
-			}
-			span[i - 1] = d;
-		}
-
-		private static unsafe void HeapSort1<T>(Span<T> span, Comparison<T> comparison) {
-			var n = span.Length;
-			if (n == 0) return;
 			for (var i = (n >> 1) - 1; i >= 0; i--) Heapify(span, i, n, comparison);
 			for (var i = n - 1; i > 0; i--) {
 				Swap(ref span[0], ref span[i]);
@@ -225,7 +201,7 @@ namespace Gal.Core
 					t--;
 
 				//如果当前节点不小于子节点,结束循环
-				if ((comparison(current, child) >= 0)) break;
+				if (comparison(current, child) >= 0) break;
 
 				//将子节点移动到父节点位置
 				span[i] = child;
@@ -252,7 +228,7 @@ namespace Gal.Core
 				}
 
 				// Choose pivot as median of 3 or pseudomedian of 9.
-				var mid = size / 2;
+				var mid = size >> 1;
 				if (size > NINTHER_THRESHOLD) {
 					Sort3(ref span[begin], ref span[begin + mid], ref span[end - 1], comparison);
 					Sort3(ref span[begin + 1], ref span[begin + mid - 1], ref span[end - 2], comparison);
@@ -272,38 +248,40 @@ namespace Gal.Core
 					begin = PartitionLeft(span, begin, end, comparison) + 1;
 					continue;
 				}
-				var (pivot, hasPartitioned) = PartitionRight(span, begin, end, comparison);
+				var pivot = PartitionRight(span, begin, end, comparison, out bool hasPartitioned);
 
 				// Check for a highly unbalanced partition.
 				var leftSize = pivot - begin;
-				var rightSize = end - (pivot + 1);
-				var highlyUnbalanced = leftSize < size / 8 || rightSize < size / 8;
+				var rightSize = size - leftSize - 1;
+				var highlyUnbalanced = leftSize < (size >> 3) || rightSize < (size >> 3);
 
 				// If we got a highly unbalanced partition we shuffle elements to break many patterns.
 				if (highlyUnbalanced) {
 					// If we had too many bad partitions, switch to heapsort to guarantee O(n log n).
 					if (--badAllowed == 0) {
-						HeapSort1(span.Slice(begin, end), comparison);
+						HeapSort(span.Slice(begin, end - begin), comparison);
 						return;
 					}
 					if (leftSize >= INSERTION_SORT_THRESHOLD) {
-						Swap(ref span[begin], ref span[begin + leftSize / 4]);
-						Swap(ref span[pivot - 1], ref span[pivot - leftSize / 4]);
+						var q = leftSize >> 2;
+						Swap(ref span[begin], ref span[begin + q]);
+						Swap(ref span[pivot - 1], ref span[pivot - q]);
 						if (leftSize > NINTHER_THRESHOLD) {
-							Swap(ref span[begin + 1], ref span[begin + leftSize / 4 + 1]);
-							Swap(ref span[begin + 2], ref span[begin + leftSize / 4 + 2]);
-							Swap(ref span[pivot - 2], ref span[pivot - (leftSize / 4 + 1)]);
-							Swap(ref span[pivot - 3], ref span[pivot - (leftSize / 4 + 2)]);
+							Swap(ref span[begin + 1], ref span[begin + q + 1]);
+							Swap(ref span[begin + 2], ref span[begin + q + 2]);
+							Swap(ref span[pivot - 2], ref span[pivot - (q + 1)]);
+							Swap(ref span[pivot - 3], ref span[pivot - (q + 2)]);
 						}
 					}
 					if (rightSize >= INSERTION_SORT_THRESHOLD) {
-						Swap(ref span[pivot + 1], ref span[pivot + 1 + rightSize / 4]);
-						Swap(ref span[end - 1], ref span[end - rightSize / 4]);
+						var q = rightSize >> 2;
+						Swap(ref span[pivot + 1], ref span[pivot + 1 + q]);
+						Swap(ref span[end - 1], ref span[end - q]);
 						if (rightSize > NINTHER_THRESHOLD) {
-							Swap(ref span[pivot + 2], ref span[pivot + 2 + rightSize / 4]);
-							Swap(ref span[pivot + 3], ref span[pivot + 3 + rightSize / 4]);
-							Swap(ref span[end - 2], ref span[end - (1 + rightSize / 4)]);
-							Swap(ref span[end - 3], ref span[end - (2 + rightSize / 4)]);
+							Swap(ref span[pivot + 2], ref span[pivot + 2 + q]);
+							Swap(ref span[pivot + 3], ref span[pivot + 3 + q]);
+							Swap(ref span[end - 2], ref span[end - (1 + q)]);
+							Swap(ref span[end - 3], ref span[end - (2 + q)]);
 						}
 					}
 				} else {
